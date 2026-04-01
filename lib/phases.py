@@ -239,6 +239,12 @@ async def run_generate_architecture_phase(args) -> None:
             print(f"Using component map from: architecture/{args.platform}/component-map.json")
             print(f"Found {len(components)} components\n")
 
+            # Extract checkouts_dir from component map metadata
+            metadata = get_component_map_metadata(args.platform)
+            if metadata and "checkouts_dir" in metadata:
+                checkouts_dir = Path(metadata["checkouts_dir"])
+                print(f"Checkouts directory from map: {checkouts_dir}\n")
+
     # If no component map found, fall back to manifest script parsing
     if not components:
         # Resolve script path - either from explicit --script-path or auto-detect from platform
