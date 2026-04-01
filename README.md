@@ -18,7 +18,7 @@ Transform a collection of Git repositories into structured, comprehensive archit
   └── tools/                                    └── Architecture diagrams (.mmd, .dsl, .png)
 ```
 
-**Input:** A platform's GitHub organization with dozens or hundreds of repositories  
+**Input:** A directory of Git repositories (any source: GitHub, GitLab, local, etc.)  
 **Output:** Structured markdown documentation, dependency graphs, and architecture diagrams
 
 Perfect for:
@@ -67,11 +67,11 @@ Creates multiple diagram formats:
 ```bash
 # Required
 python 3.9+
-gh (GitHub CLI)
 anthropic API key
 
-# Optional (for diagrams)
-mmdc (mermaid-cli)
+# Optional
+gh (GitHub CLI)          # Only needed for Phase 1 (fetch)
+mmdc (mermaid-cli)      # For rendering diagrams to PNG
 ```
 
 ### Installation
@@ -88,7 +88,7 @@ pip install -r requirements.txt  # or use uv
 # 3. Set up authentication
 echo "ANTHROPIC_API_KEY=sk-ant-..." > .env
 
-# Configure gh CLI (if not already done)
+# 4. (Optional) Configure gh CLI if using fetch phase
 gh auth login
 ```
 
@@ -143,17 +143,94 @@ architecture/aap/
 
 ---
 
+## 📁 Organizing Your Checkouts
+
+**Phase 1 (fetch) is optional!** You don't need to use the built-in `fetch` command if you already have repositories cloned or scattered across different locations.
+
+### Manual Checkout Organization
+
+Simply organize your repos into a directory structure and point the pipeline at it:
+
+```bash
+# Create a checkout directory for your platform
+mkdir -p checkouts/myplatform
+
+# Clone or symlink repos however you like
+cd checkouts/myplatform
+
+# Option 1: Clone directly
+git clone https://github.com/org/repo1
+git clone https://github.com/org/repo2
+
+# Option 2: Symlink existing checkouts
+ln -s ~/projects/repo1 ./repo1
+ln -s ~/workspace/repo2 ./repo2
+
+# Option 3: Mix from multiple organizations
+git clone https://github.com/org1/component-a
+git clone https://github.com/org2/component-b
+git clone https://gitlab.com/org3/component-c
+
+# Option 4: Copy from elsewhere
+cp -r /mnt/archive/old-repo ./old-repo
+```
+
+**Expected structure:**
+```
+checkouts/myplatform/
+├── component-a/           # Any repo structure
+├── component-b/
+├── component-c/
+└── operator/
+```
+
+### Using Manual Checkouts
+
+Once organized, just point the pipeline at your directory:
+
+```bash
+# Discover components (reads from your directory)
+python main.py discover-components \
+  --platform=myplatform \
+  --checkouts-dir=./checkouts/myplatform
+
+# Or if you have a manifest script in one of the repos
+python main.py parse-manifests \
+  --platform=myplatform \
+  --script-path=./checkouts/myplatform/operator/get_all_manifests.sh \
+  --write-map
+
+# Then proceed with analysis
+python main.py generate-architecture --platform=myplatform
+```
+
+### When to Skip Fetch Phase
+
+Use manual organization when:
+- ✅ Repos are in multiple GitHub orgs
+- ✅ Some repos are in GitLab, Bitbucket, etc.
+- ✅ You already have local checkouts
+- ✅ You need specific branches for different components
+- ✅ Some repos are private/archived and need special handling
+- ✅ Working with a subset of repos from a large org
+
+The `fetch` phase is just a convenience wrapper around `gh-org-clone`. If that doesn't fit your workflow, skip it!
+
+---
+
 ## 📖 Usage
 
 ### Phase-by-Phase Execution
 
 The pipeline is organized into 6 phases that can be run independently:
 
-#### **Phase 1: Fetch Repositories**
+#### **Phase 1: Fetch Repositories** _(Optional)_
 ```bash
 python main.py fetch <org> --branch=<branch>
 ```
 Clone all repositories from a GitHub organization.
+
+**Note:** This is optional! You can organize checkouts manually if repos are scattered across orgs or already cloned locally. See [Organizing Your Checkouts](#-organizing-your-checkouts) above.
 
 #### **Phase 2a: Parse Manifests** (for platforms with manifest scripts)
 ```bash
