@@ -102,13 +102,22 @@ find {entry_repo} -name "requirements*.txt" -o -name "pyproject.toml"
 cat {found_files}
 ```
 
+Look for patterns like:
+- `django-ansible-base>=1.0.0` - First-party package (matches repo name)
+- `-e git+https://github.com/ansible/django-ansible-base.git` - Editable install from git
+- `file:///path/to/local/repo` - Local dependency
+
 **Go** (`go.mod`):
 ```bash
 find {entry_repo} -name "go.mod"
 cat {found_files}
 ```
 
-Look for local/relative dependencies that might be other repos.
+Look for:
+- `github.com/ansible/common-lib v1.0.0` - First-party module
+- `replace github.com/ansible/foo => ../foo` - Local replacement
+
+**Key insight:** If a dependency name matches a repo in the checkouts directory, it's likely a first-party shared library!
 
 #### 4d. Git Submodules
 ```bash
@@ -132,16 +141,53 @@ Look for:
 As you discover references:
 1. Check if referenced repo exists in checkouts directory
 2. If yes, add to component list with `discovered_via` and `referenced_by`
-3. Mark as `shipped: true` (since it's referenced by an entry point)
+3. Track what type of reference (deployed_component vs. dependency)
+4. Mark as `shipped: true` if deployed directly
 
 Track the dependency graph:
 ```
 {
   "installer": ["awx-operator", "eda-operator"],
-  "awx-operator": ["awx-api", "awx-ui"],
+  "awx-operator": ["awx-api", "awx-ui", "django-ansible-base"],
+  "eda-operator": ["eda-server", "django-ansible-base"],
   ...
 }
 ```
+
+### Step 5a: Identify Shared Libraries
+
+After building the dependency graph, analyze it to find shared libraries:
+
+**Reverse the dependency graph** to count consumers:
+```
+{
+  "awx-operator": ["installer"],                          # 1 consumer
+  "eda-operator": ["installer"],                          # 1 consumer
+  "awx-api": ["awx-operator"],                           # 1 consumer
+  "django-ansible-base": ["awx-operator", "eda-operator", "automation-hub-operator"]  # 3 consumers!
+}
+```
+
+**Shared library detection criteria:**
+1. Is a dependency (not deployed standalone)
+2. Used by 2+ platform components
+3. In the same organization (first-party, not third-party)
+4. Contains actual code (not just config/docs)
+
+**For detected shared libraries:**
+- Mark as `type: "shared_library"`
+- Set `shipped: false` (not deployed directly)
+- Set `architecturally_significant: true`
+- Add `consumer_count` and `consumers: [...]`
+- Include in component map (don't exclude!)
+
+**Examples:**
+- ✅ `django-ansible-base` - Shared Django utilities used by AWX, EDA, Hub
+- ✅ `ansible-common-auth` - Shared authentication library
+- ✅ `platform-sdk` - SDK used by multiple operators
+- ❌ `django` - Third-party (not in platform org)
+- ❌ `postgres` - Third-party infrastructure
+- ❌ `one-off-util` - Only used by one component
 
 ### Step 6: Classify Remaining Repos
 
@@ -196,9 +242,13 @@ Create the component map structure:
       "source_folder": "config",
       "checkout_path": "{full-path}",
       "has_architecture": false,
+      "type": "operator|service|shared_library",
       "discovered_via": "operator_bundle|container_image|dependency|installer",
       "referenced_by": ["installer"],
-      "shipped": true
+      "shipped": true,
+      "architecturally_significant": true,
+      "consumer_count": 3,
+      "consumers": ["awx-operator", "eda-operator", "hub-operator"]
     }
   },
   "dependency_graph": {
@@ -241,10 +291,11 @@ Entry points used:
   - {entry2}
 
 Discovered components:
-  ✓ awx-operator (via: operator_bundle, ref by: installer)
-  ✓ eda-operator (via: operator_bundle, ref by: installer)
-  ✓ awx-api (via: container_image, ref by: awx-operator)
-  ✓ eda-server (via: container_image, ref by: eda-operator)
+  ✓ awx-operator (type: operator, via: operator_bundle, ref by: installer)
+  ✓ eda-operator (type: operator, via: operator_bundle, ref by: installer)
+  ✓ awx-api (type: service, via: container_image, ref by: awx-operator)
+  ✓ eda-server (type: service, via: container_image, ref by: eda-operator)
+  ✓ django-ansible-base (type: shared_library, used by: 3 components) [ARCHITECTURALLY SIGNIFICANT]
   ...
 
 Excluded repositories:
@@ -262,31 +313,65 @@ Next steps:
 ================================================================================
 ```
 
-## Heuristics for Shipped Components
+## Heuristics for Component Classification
 
-High confidence (definitely shipped):
+### Include: Deployed Components (shipped: true)
+
+**High confidence (definitely deployed):**
 - Referenced in operator manifests
 - Referenced in installer playbooks
 - Container image built in CI and pushed to registry
 - Listed in OLM bundle
+- Has operator structure (bundle/, config/manager/)
 
-Medium confidence (probably shipped):
-- Has operator structure
-- Has recent releases
+**Medium confidence (probably deployed):**
 - Has Kubernetes manifests
+- Has recent releases
 - Referenced by other high-confidence components
 
-Low confidence (maybe shipped):
+**Low confidence (maybe deployed):**
 - Has Dockerfile
 - Active development
 - Matches naming pattern
 
-Exclude:
-- Docs/wiki repos
-- CI/CD tooling
-- Test frameworks
-- Development utilities
-- Archived/stale repos
+### Include: Shared Libraries (shipped: false, architecturally_significant: true)
+
+**Critical shared libraries:**
+- First-party code (same GitHub org)
+- Used by 2+ platform components
+- Contains actual code (not just config/docs)
+- Examples: django-ansible-base, shared authentication libraries, common SDKs
+
+**Detection method:**
+1. Found in requirements.txt, pyproject.toml, go.mod of multiple repos
+2. Reverse dependency count ≥ 2
+3. Repo exists in checkouts directory (first-party)
+4. Has source code (not a meta-repo)
+
+**Why include them:**
+- Critical for understanding platform architecture
+- Needed for security reviews (shared code paths)
+- Dependency impact analysis (if library has vulnerability, which components affected?)
+- Architecture dependencies (components share behavior through these)
+
+### Exclude: Non-Components
+
+**Always exclude:**
+- Third-party dependencies (django, flask, postgres, redis)
+- Docs/wiki repos (no code, just markdown)
+- CI/CD tooling repos
+- Test frameworks and utilities
+- Development helpers
+- Archived/stale repos (no commits in 12+ months)
+
+**How to distinguish first-party from third-party:**
+- First-party: In the same GitHub org as platform
+- Third-party: External dependencies (PyPI, npm, Go modules)
+
+**Special cases:**
+- One-off dependencies (only used by 1 component): Exclude unless deployed
+- Internal tools (used by developers, not shipped): Exclude
+- Vendored third-party code: Exclude (treat as third-party)
 
 ## Error Handling
 
@@ -301,3 +386,24 @@ Exclude:
 - User can manually edit `component-map.json` after generation
 - Designed for platforms without central manifest scripts
 - Outputs same format as manifest parser for pipeline compatibility
+
+### Critical: Don't Exclude Shared Libraries!
+
+**Common mistake:** Excluding repos because they're "just dependencies"
+
+**Why this is wrong:**
+- First-party shared libraries (like django-ansible-base) are architecturally critical
+- They're YOUR code, not third-party packages
+- Security vulnerabilities in shared libraries impact ALL consumers
+- Understanding the platform requires understanding shared foundations
+- Architecture reviews need to see the full dependency picture
+
+**Rule of thumb:**
+- If it's in the same GitHub org AND used by 2+ components → INCLUDE IT
+- Mark it as `type: "shared_library"` and `architecturally_significant: true`
+- This is different from third-party deps like django, postgres, redis (exclude those)
+
+**Example distinction:**
+- ✅ Include: `ansible/django-ansible-base` (first-party, used by AWX + EDA + Hub)
+- ❌ Exclude: `django/django` (third-party, not in ansible org)
+- ❌ Exclude: `postgres` (infrastructure, third-party)

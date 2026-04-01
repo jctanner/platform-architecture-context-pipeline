@@ -17,6 +17,11 @@ def write_component_map(
     """
     Write component map to architecture/<platform>/component-map.json.
 
+    Note: The discover-components skill writes additional fields beyond what
+    ComponentInfo supports (type, architecturally_significant, consumer_count,
+    consumers, discovered_via, referenced_by, shipped). Those fields are written
+    directly to the JSON and preserved when reading, but not mapped to ComponentInfo.
+
     Args:
         platform: Platform name (e.g., "aap", "rhoai", "odh")
         components: Dict of component key -> ComponentInfo
