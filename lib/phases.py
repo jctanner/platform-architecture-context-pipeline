@@ -5,6 +5,7 @@ import sys
 import asyncio
 import subprocess
 import fnmatch
+import shutil
 from pathlib import Path
 
 from lib.fetch import fetch_repositories
@@ -1099,11 +1100,6 @@ async def run_collect_architectures_phase(args) -> None:
     checkouts_dir = Path(args.checkouts_dir)
     output_dir = Path(args.output_dir)
 
-    # Validate checkouts directory
-    if not checkouts_dir.exists():
-        print(f"Error: Checkouts directory does not exist: {checkouts_dir}")
-        return
-
     # Determine org filter (takes precedence over platform)
     org_filter = getattr(args, 'org', None)
 
@@ -1114,6 +1110,40 @@ async def run_collect_architectures_phase(args) -> None:
 
     # Determine version filter
     version_filter = getattr(args, 'version', None)
+
+    # If platform specified, try to use component map
+    if platform_filter and platform_filter != "all":
+        # Try reading component map for this platform
+        components = read_component_map(platform_filter, str(output_dir))
+        if components:
+            print(f"Using component map: {output_dir}/{platform_filter}/component-map.json\n")
+
+            # Collect from component map
+            platform_dir = Path(output_dir) / platform_filter
+            platform_dir.mkdir(parents=True, exist_ok=True)
+
+            files_created = []
+            for key, component in components.items():
+                if component.checkout_path and component.has_architecture:
+                    src = component.checkout_path / "GENERATED_ARCHITECTURE.md"
+                    if src.exists():
+                        # Use component key as filename (e.g., "awx-operator.md")
+                        dst = platform_dir / f"{key}.md"
+                        shutil.copy2(src, dst)
+                        files_created.append(dst)
+                        print(f"  ✓ {key}.md")
+
+            print(f"\n{'=' * 60}")
+            print(f"Collected {len(files_created)} component architecture(s) to:")
+            print(f"  {platform_dir}")
+            print(f"{'=' * 60}")
+            return
+
+    # Fallback to legacy collection (for odh/rhoai or when no component map)
+    # Validate checkouts directory
+    if not checkouts_dir.exists():
+        print(f"Error: Checkouts directory does not exist: {checkouts_dir}")
+        return
 
     # Run collection
     summary = collect_architectures(checkouts_dir, output_dir, platform_filter, version_filter, org_filter)
