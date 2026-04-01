@@ -1124,8 +1124,9 @@ async def run_collect_architectures_phase(args) -> None:
 
             files_created = []
             for key, component in components.items():
-                if component.checkout_path and component.has_architecture:
+                if component.checkout_path:
                     src = component.checkout_path / "GENERATED_ARCHITECTURE.md"
+                    # Check if file actually exists on disk (don't trust has_architecture flag)
                     if src.exists():
                         # Use component key as filename (e.g., "awx-operator.md")
                         dst = platform_dir / f"{key}.md"
@@ -1136,6 +1137,9 @@ async def run_collect_architectures_phase(args) -> None:
             print(f"\n{'=' * 60}")
             print(f"Collected {len(files_created)} component architecture(s) to:")
             print(f"  {platform_dir}")
+            if len(files_created) == 0:
+                print(f"\n⚠️  No GENERATED_ARCHITECTURE.md files found in component checkouts.")
+                print(f"Run 'python main.py generate-architecture --platform={platform_filter}' first.")
             print(f"{'=' * 60}")
             return
 
