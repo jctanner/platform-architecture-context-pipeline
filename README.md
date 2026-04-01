@@ -6,7 +6,7 @@ Analyze complex software platforms and generate comprehensive architecture docum
 
 ---
 
-## 🎯 What This Does
+## What This Does
 
 Transform a collection of Git repositories into structured, comprehensive architecture documentation:
 
@@ -22,22 +22,22 @@ Transform a collection of Git repositories into structured, comprehensive archit
 **Output:** Structured markdown documentation, dependency graphs, and architecture diagrams
 
 Perfect for:
-- 📋 Architecture reviews and audits
-- 🔒 Security Architecture Reviews (SAR)
-- 📚 Technical documentation
-- 🧭 Onboarding new team members
-- 🔍 Understanding complex platforms
+- Architecture reviews and audits
+- Security Architecture Reviews (SAR)
+- Technical documentation
+- Onboarding new team members
+- Understanding complex platforms
 
 ---
 
-## ✨ Key Features
+## Key Features
 
-### 🔍 **Intelligent Component Discovery**
+### Intelligent Component Discovery
 Two discovery methods for maximum flexibility:
 - **Manifest-Based**: Parse existing manifest scripts (ODH, RHOAI)
 - **Breadcrumb-Based**: Explore operators, dependencies, installers to discover components organically (Ansible, AAP)
 
-### 🤖 **AI-Powered Analysis**
+### AI-Powered Analysis
 Claude AI agents analyze each component:
 - Code structure and architecture patterns
 - Dependencies and integrations
@@ -45,14 +45,14 @@ Claude AI agents analyze each component:
 - Security considerations
 - Deployment configurations
 
-### 📊 **Automatic Diagram Generation**
+### Automatic Diagram Generation
 Creates multiple diagram formats:
 - **Mermaid** diagrams (component, sequence, deployment)
 - **C4 diagrams** (context, container, component)
 - **Security diagrams** (network topology, data flows)
 - **PNG renders** for easy sharing
 
-### ⚙️ **Production-Ready Pipeline**
+### Production-Ready Pipeline
 - **Concurrent processing**: Run multiple agents in parallel
 - **Resumable**: Automatically skip already-analyzed components
 - **Editable maps**: Manual review and adjustment of component lists
@@ -60,7 +60,7 @@ Creates multiple diagram formats:
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Prerequisites
 
@@ -143,7 +143,7 @@ architecture/aap/
 
 ---
 
-## 📁 Organizing Your Checkouts
+## Organizing Your Checkouts
 
 **Phase 1 (fetch) is optional!** You don't need to use the built-in `fetch` command if you already have repositories cloned or scattered across different locations.
 
@@ -218,7 +218,7 @@ The `fetch` phase is just a convenience wrapper around `gh-org-clone`. If that d
 
 ---
 
-## 📖 Usage
+## Usage
 
 ### Phase-by-Phase Execution
 
@@ -312,7 +312,7 @@ Choose the right Claude model for your task:
 
 ---
 
-## 🏗️ Architecture
+## Architecture
 
 ### Pipeline Flow
 
@@ -378,7 +378,7 @@ Located in `.claude/skills/`, each skill is a specialized AI agent:
 
 ---
 
-## 📂 Project Structure
+## Project Structure
 
 ```
 .
@@ -414,7 +414,7 @@ Located in `.claude/skills/`, each skill is a specialized AI agent:
 
 ---
 
-## 📚 Documentation
+## Documentation
 
 - **[docs/README.md](docs/README.md)** - Complete pipeline guide
 - **[docs/component-discovery.md](docs/component-discovery.md)** - Discovery methods explained
@@ -443,7 +443,7 @@ Each component receives a structured markdown document:
 
 ---
 
-## 🎨 Customization
+## Customization
 
 ### Adding a New Platform
 
@@ -495,7 +495,7 @@ Re-run phases after editing—changes are preserved.
 
 ---
 
-## 🔧 Troubleshooting
+## Troubleshooting
 
 ### Skills Not Loading
 ```bash
@@ -538,7 +538,7 @@ python main.py generate-architecture \
 
 ---
 
-## 🤝 Contributing
+## Contributing
 
 Contributions welcome! This is an experimental pipeline for architecture documentation.
 
@@ -551,13 +551,13 @@ Contributions welcome! This is an experimental pipeline for architecture documen
 
 ---
 
-## 📄 License
+## License
 
 [Add your license here]
 
 ---
 
-## 🙏 Credits
+## Credits
 
 Built with:
 - **[Claude AI](https://anthropic.com/claude)** - AI-powered analysis and documentation
@@ -568,7 +568,7 @@ Built with:
 
 ---
 
-## 💡 Example Output
+## Example Output
 
 ### Component Architecture Summary
 ```markdown
