@@ -144,8 +144,8 @@ def parse_args():
     )
     generate_arch_parser.add_argument(
         "--platform",
-        choices=["odh", "rhoai"],
-        help="Platform to process (odh or rhoai). Optional - used for auto-detecting org/operator names."
+        help="Platform to process. Can be 'odh', 'rhoai', 'aap', or any custom platform name. "
+             "If using a component-map.json, this should match the platform name used in discovery."
     )
     generate_arch_parser.add_argument(
         "--org",
@@ -214,8 +214,8 @@ def parse_args():
     )
     collect_parser.add_argument(
         "--platform",
-        choices=["odh", "rhoai", "all"],
-        help="Which platform to collect (default: all). Ignored if --org is specified."
+        help="Which platform to collect (e.g., 'odh', 'rhoai', 'aap', or 'all' for all platforms). "
+             "Ignored if --org is specified."
     )
     collect_parser.add_argument(
         "--version",
