@@ -15,6 +15,7 @@ from lib.manifest_parser import (
     components_to_json,
     discover_adjacent_components,
 )
+from lib.component_discovery import write_component_map, read_component_map, get_component_map_metadata
 from lib.build_info import get_build_info, format_build_info_context
 from lib.kustomize_context import get_component_kustomize_context, format_kustomize_context
 from lib.agent_runner import run_agent, run_agents_concurrently, get_model_display_name, format_duration
@@ -124,6 +125,91 @@ async def run_manifest_phase(args) -> None:
         print(f"Processed {len(components)} components successfully")
         print(f"{'=' * 60}")
 
+        # Optionally write component-map.json
+        if getattr(args, 'write_map', False):
+            metadata = {
+                "platform": args.platform,
+                "discovery_method": "manifest_script",
+                "manifest_path": str(script_path),
+            }
+            map_file = write_component_map(args.platform, components, metadata)
+            print(f"\n✓ Wrote component map: {map_file}")
+
+
+async def run_discover_components_phase(args) -> None:
+    """Run Phase 2b: Discover components via breadcrumb exploration."""
+    print("\n" + "=" * 60)
+    print("PHASE 2B: Discovering platform components")
+    print("=" * 60 + "\n")
+
+    print(f"Platform: {args.platform}")
+    print(f"Checkouts directory: {args.checkouts_dir}")
+    if args.entry_repo:
+        print(f"Entry point: {args.entry_repo}")
+    print()
+
+    # Build a simple prompt that will trigger the discover-components skill
+    # The skill description will match and Claude will invoke it automatically
+    exclude_patterns = getattr(args, 'exclude', '')
+    exclude_line = f" --exclude={exclude_patterns}" if exclude_patterns else ""
+    entry_line = f" --entry-repo={args.entry_repo}" if args.entry_repo else ""
+
+    prompt = f"""Use the discover-components skill to discover platform components.
+
+Arguments:
+--platform={args.platform}
+--checkouts-dir={args.checkouts_dir}{entry_line}{exclude_line}
+--architecture-dir={args.architecture_dir}
+"""
+
+    # Create output directory for logs
+    log_dir = Path("logs/discover-components")
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"Running component discovery with Skills enabled...")
+    print(f"Model: {args.model}")
+    print(f"Log directory: {log_dir}\n")
+
+    # Run the agent with Skills enabled
+    job = {
+        "name": f"discover-{args.platform}",
+        "cwd": ".",
+        "prompt": prompt,
+    }
+
+    result = await run_agent(job, log_dir, args.model, enable_skills=True)
+
+    # Report result
+    print("\n" + "=" * 60)
+    if result.get("success"):
+        print("COMPONENT DISCOVERY COMPLETE")
+        print("=" * 60)
+
+        # Check if component-map.json was created
+        map_file = Path(args.architecture_dir) / args.platform / "component-map.json"
+        if map_file.exists():
+            print(f"✓ Component map written: {map_file}")
+
+            # Read and display summary
+            metadata = get_component_map_metadata(args.platform, args.architecture_dir)
+            if metadata:
+                print(f"\nDiscovery summary:")
+                print(f"  Method: {metadata.get('discovery_method', 'N/A')}")
+                print(f"  Total repos scanned: {metadata.get('total_repos_scanned', 'N/A')}")
+                print(f"  Components discovered: {metadata.get('components_discovered', 'N/A')}")
+                print(f"  Components excluded: {metadata.get('components_excluded', 'N/A')}")
+        else:
+            print("⚠ Component map not found (agent may have failed)")
+    else:
+        print("COMPONENT DISCOVERY FAILED")
+        print("=" * 60)
+        print(f"Error: {result.get('error', 'Unknown error')}")
+
+    if result.get('log_file'):
+        print(f"\nAgent log: {result['log_file']}")
+
+    print("=" * 60)
+
 
 async def run_generate_architecture_phase(args) -> None:
     """Run Phase 3: Generate architecture documentation."""
@@ -141,89 +227,99 @@ async def run_generate_architecture_phase(args) -> None:
     if args.platform:
         operator_name = "opendatahub-operator" if args.platform == "odh" else "rhods-operator"
 
-    # Resolve script path - either from explicit --script-path or auto-detect from platform
-    script_path = args.script_path  # Use explicit path if provided
-    if not script_path and args.platform:
-        # Auto-resolve only if platform is specified
-        script_path = resolve_script_path(
-            platform=args.platform,
-            org=org,
-            branch=args.branch,
-            checkouts_dir=args.checkouts_dir,
-            script_path=None,
-        )
-
-    # Process manifests to get component info (only if script_path exists)
+    # Try to read from component-map.json first (if platform specified)
     components = {}
     operator_path = None
     checkouts_dir = None
 
-    if script_path:
-        components = process_manifest_script(
-            script_path,
-            platform=args.platform if args.platform else "odh",  # Default to "odh" if no platform
-            checkouts_dir=None  # Auto-detect from script_path
-        )
+    if args.platform:
+        # Try reading component map first
+        components = read_component_map(args.platform) or {}
+        if components:
+            print(f"Using component map from: architecture/{args.platform}/component-map.json")
+            print(f"Found {len(components)} components\n")
 
-        # Also check the operator repository itself (it's not in COMPONENT_MANIFESTS)
-        # The operator is the central component that manages all other components
-        script_path_obj = Path(script_path)
-        operator_path = script_path_obj.parent
-
-        # Determine checkouts_dir from script path (needed for operator + adjacent discovery)
-        parts = script_path_obj.parts
-        if "checkouts" in parts:
-            checkouts_idx = parts.index("checkouts")
-            checkouts_dir = Path(*parts[:checkouts_idx+2])
-        else:
-            checkouts_dir = script_path_obj.parent.parent
-
-        if operator_path.exists():
-            # Check if operator has architecture file
-            operator_arch_file = operator_path / "GENERATED_ARCHITECTURE.md"
-            has_operator_arch = operator_arch_file.exists()
-
-            # Create ComponentInfo for the operator
-            operator_component = ComponentInfo(
-                key="operator",  # Special key for the operator
-                repo_org=org,
-                repo_name=operator_name,
-                ref="N/A",  # Not from manifest
-                source_folder="config",  # Standard operator config location
-                checkout_path=operator_path,
-                has_architecture=has_operator_arch
+    # If no component map found, fall back to manifest script parsing
+    if not components:
+        # Resolve script path - either from explicit --script-path or auto-detect from platform
+        script_path = args.script_path  # Use explicit path if provided
+        if not script_path and args.platform:
+            # Auto-resolve only if platform is specified
+            script_path = resolve_script_path(
+                platform=args.platform,
+                org=org,
+                branch=args.branch,
+                checkouts_dir=args.checkouts_dir,
+                script_path=None,
             )
 
-            # Add operator to components dict
-            components["operator"] = operator_component
+        # Process manifests to get component info (only if script_path exists)
+        if script_path:
+            components = process_manifest_script(
+                script_path,
+                platform=args.platform if args.platform else "odh",  # Default to "odh" if no platform
+                checkouts_dir=None  # Auto-detect from script_path
+            )
 
-        # Discover adjacent components from the checkout directory
-        # Only for RHOAI (red-hat-data-services) with a branch specified,
-        # since opendatahub-io has too many irrelevant repos
-        if args.platform == "rhoai" and args.branch:
-            adjacent = discover_adjacent_components(checkouts_dir, components, org)
-            if adjacent:
-                print(f"Discovered {len(adjacent)} adjacent component(s) beyond manifests")
-                components.update(adjacent)
-    elif org:
-        # No script_path but org is specified - discover components directly from checkouts
-        # Build checkouts directory path
-        base_checkouts_dir = Path(args.checkouts_dir)
-        if args.branch:
-            checkouts_dir = base_checkouts_dir / f"{org}.{args.branch}"
-        else:
-            checkouts_dir = base_checkouts_dir / org
+            # Also check the operator repository itself (it's not in COMPONENT_MANIFESTS)
+            # The operator is the central component that manages all other components
+            script_path_obj = Path(script_path)
+            operator_path = script_path_obj.parent
 
-        if checkouts_dir.exists():
-            print(f"Discovering components from: {checkouts_dir}")
-            # Discover all components (no existing components to filter)
-            components = discover_adjacent_components(checkouts_dir, {}, org)
-            if components:
-                print(f"Discovered {len(components)} component(s) from org directory\n")
-        else:
-            print(f"ERROR: Checkouts directory does not exist: {checkouts_dir}")
-            print(f"Run 'python main.py fetch {org}' first to clone repositories")
-            return
+            # Determine checkouts_dir from script path (needed for operator + adjacent discovery)
+            parts = script_path_obj.parts
+            if "checkouts" in parts:
+                checkouts_idx = parts.index("checkouts")
+                checkouts_dir = Path(*parts[:checkouts_idx+2])
+            else:
+                checkouts_dir = script_path_obj.parent.parent
+
+            if operator_path.exists():
+                # Check if operator has architecture file
+                operator_arch_file = operator_path / "GENERATED_ARCHITECTURE.md"
+                has_operator_arch = operator_arch_file.exists()
+
+                # Create ComponentInfo for the operator
+                operator_component = ComponentInfo(
+                    key="operator",  # Special key for the operator
+                    repo_org=org,
+                    repo_name=operator_name,
+                    ref="N/A",  # Not from manifest
+                    source_folder="config",  # Standard operator config location
+                    checkout_path=operator_path,
+                    has_architecture=has_operator_arch
+                )
+
+                # Add operator to components dict
+                components["operator"] = operator_component
+
+            # Discover adjacent components from the checkout directory
+            # Only for RHOAI (red-hat-data-services) with a branch specified,
+            # since opendatahub-io has too many irrelevant repos
+            if args.platform == "rhoai" and args.branch:
+                adjacent = discover_adjacent_components(checkouts_dir, components, org)
+                if adjacent:
+                    print(f"Discovered {len(adjacent)} adjacent component(s) beyond manifests")
+                    components.update(adjacent)
+        elif org:
+            # No script_path but org is specified - discover components directly from checkouts
+            # Build checkouts directory path
+            base_checkouts_dir = Path(args.checkouts_dir)
+            if args.branch:
+                checkouts_dir = base_checkouts_dir / f"{org}.{args.branch}"
+            else:
+                checkouts_dir = base_checkouts_dir / org
+
+            if checkouts_dir.exists():
+                print(f"Discovering components from: {checkouts_dir}")
+                # Discover all components (no existing components to filter)
+                components = discover_adjacent_components(checkouts_dir, {}, org)
+                if components:
+                    print(f"Discovered {len(components)} component(s) from org directory\n")
+            else:
+                print(f"ERROR: Checkouts directory does not exist: {checkouts_dir}")
+                print(f"Run 'python main.py fetch {org}' first to clone repositories")
+                return
 
     # Extract build metadata from RHOAI-Build-Config (RHOAI only)
     build_info = None
@@ -1162,6 +1258,8 @@ async def main(args) -> None:
         await run_fetch_phase(args)
     elif args.command == "parse-manifests":
         await run_manifest_phase(args)
+    elif args.command == "discover-components":
+        await run_discover_components_phase(args)
     elif args.command == "generate-architecture":
         await run_generate_architecture_phase(args)
     elif args.command == "collect-architectures":

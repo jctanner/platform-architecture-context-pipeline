@@ -1,4 +1,23 @@
-"""Claude SDK agent launcher and model utilities."""
+"""Claude SDK agent launcher and model utilities.
+
+Two approaches for running agents:
+
+1. **Direct Skill Invocation** (enable_skills=True):
+   - Let Claude discover and invoke skills automatically
+   - Agent has access to the Skill tool
+   - Skills loaded from .claude/skills/ via setting_sources
+   - Best for: Simple prompts that don't need heavy templating
+   - Example: discover-components, collect-architectures
+
+2. **Templated Prompts** (enable_skills=False, default):
+   - Manually extract instructions from SKILL.md
+   - Template with runtime data (git metadata, build info, etc.)
+   - Full control over prompt construction
+   - Best for: Complex workflows needing context injection
+   - Example: generate-architecture (injects git, build, kustomize context)
+
+Both approaches use the same run_agent() function.
+"""
 
 import time
 import asyncio
@@ -59,31 +78,48 @@ def format_duration(seconds: float) -> str:
     return " ".join(parts)
 
 
-async def run_agent(name: str, cwd: str, prompt: str, log_dir: Path, model: str = "sonnet") -> dict:
+async def run_agent(
+    job: dict,
+    log_dir: Path,
+    model: str = "sonnet",
+    enable_skills: bool = False
+) -> dict:
     """
-    Launch one independent Claude agent session to generate architecture.
+    Launch one independent Claude agent session.
 
     Args:
-        name: Component name for identification
-        cwd: Working directory for the agent
-        prompt: Prompt to send to the agent
+        job: Dict with 'name', 'cwd', 'prompt' keys
         log_dir: Directory to write log files
         model: Claude model to use (sonnet, opus, or haiku)
+        enable_skills: If True, enable Skill tool and load skills from filesystem
 
     Returns:
         dict with 'name', 'success', 'log_file', and optional 'error' keys
     """
+    name = job["name"]
+    cwd = job["cwd"]
+    prompt = job["prompt"]
+
     # Create log file for this agent
     log_file = log_dir / f"{name.replace('/', '_')}.log"
 
     # Convert shorthand to full model ID
     model_id = get_model_id(model)
 
+    # Base allowed tools
+    allowed_tools = ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]
+
+    # Add Skill tool if skills are enabled
+    if enable_skills:
+        allowed_tools.append("Skill")
+
     options = ClaudeAgentOptions(
         cwd=cwd,
-        allowed_tools=["Read", "Write", "Edit", "Bash", "Glob", "Grep"],
+        allowed_tools=allowed_tools,
         permission_mode="bypassPermissions",
         model=model_id,
+        # Enable Skills loading from filesystem if requested
+        setting_sources=["user", "project"] if enable_skills else None,
         # No max_turns - let agent run as long as needed for thorough analysis
     )
 
@@ -169,6 +205,7 @@ async def run_agents_concurrently(
     log_dir: Path,
     model: str,
     max_concurrent: int,
+    enable_skills: bool = False,
 ) -> list:
     """
     Run multiple agent jobs with a concurrency limit.
@@ -181,6 +218,7 @@ async def run_agents_concurrently(
         log_dir: Directory for agent log files
         model: Model shorthand (sonnet, opus, haiku)
         max_concurrent: Max agents running at once
+        enable_skills: If True, enable Skill tool and load skills from filesystem
 
     Returns:
         List of result dicts (or Exceptions) in the same order as jobs
@@ -193,9 +231,7 @@ async def run_agents_concurrently(
             print(f"[{job['name']}] queued ({index + 1}/{total}), "
                   f"waiting for slot ...")
         async with semaphore:
-            return await run_agent(
-                job["name"], job["cwd"], job["prompt"], log_dir, model
-            )
+            return await run_agent(job, log_dir, model, enable_skills)
 
     print("Starting agent execution...\n")
     return await asyncio.gather(

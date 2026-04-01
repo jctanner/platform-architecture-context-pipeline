@@ -62,7 +62,7 @@ def parse_args():
         help="Specific branch to clone (skips repos without this branch)"
     )
 
-    # Phase 2: Parse manifests
+    # Phase 2a: Parse manifests (for platforms with manifest scripts)
     manifest_parser = subparsers.add_parser(
         "parse-manifests",
         help="Parse get_all_manifests.sh to extract component info"
@@ -95,6 +95,46 @@ def parse_args():
         choices=["summary", "json"],
         default="summary",
         help="Output format: summary (human-readable) or json (structured data)"
+    )
+    manifest_parser.add_argument(
+        "--write-map",
+        action="store_true",
+        help="Write component-map.json to architecture/{platform}/"
+    )
+
+    # Phase 2b: Discover components (for platforms without manifest scripts)
+    discover_parser = subparsers.add_parser(
+        "discover-components",
+        help="Discover components by exploring breadcrumbs (installers, operators, dependencies)"
+    )
+    discover_parser.add_argument(
+        "--platform",
+        required=True,
+        help="Platform identifier (e.g., 'aap', 'ansible')"
+    )
+    discover_parser.add_argument(
+        "--checkouts-dir",
+        required=True,
+        help="Directory containing cloned repositories"
+    )
+    discover_parser.add_argument(
+        "--entry-repo",
+        help="Starting point repository (e.g., 'installer', 'operator')"
+    )
+    discover_parser.add_argument(
+        "--architecture-dir",
+        default="architecture",
+        help="Output directory (default: architecture)"
+    )
+    discover_parser.add_argument(
+        "--exclude",
+        help="Additional repos to exclude (comma-separated patterns)"
+    )
+    discover_parser.add_argument(
+        "--model",
+        choices=["sonnet", "opus", "haiku"],
+        default="sonnet",
+        help="Claude model to use for discovery (default: sonnet)"
     )
 
     # Phase 3: Generate architecture
