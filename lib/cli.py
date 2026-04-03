@@ -315,6 +315,12 @@ def parse_args():
         default="opus",
         help="Claude model to use (default: opus)"
     )
+    diagrams_parser.add_argument(
+        "--png-width",
+        type=int,
+        default=10000,
+        help="Width for exported PNG files from Mermaid diagrams (default: 10000)"
+    )
 
     # All phases
     all_parser = subparsers.add_parser(
