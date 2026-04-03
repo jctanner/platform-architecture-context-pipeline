@@ -298,6 +298,13 @@ def parse_args():
         help="Limit number of files to process (for testing)"
     )
     diagrams_parser.add_argument(
+        "--component",
+        action="append",
+        dest="components",
+        help="Only process specific component(s). Use 'platform' for PLATFORM.md. "
+             "Supports glob patterns (e.g., 'awx-*'). Can be specified multiple times."
+    )
+    diagrams_parser.add_argument(
         "--force-regenerate",
         action="store_true",
         help="Regenerate diagrams even if they already exist"
