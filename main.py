@@ -10,23 +10,11 @@ from dotenv import load_dotenv
 from lib.cli import parse_args
 from lib.phases import main
 
-# Load environment variables from .env file
+# Load environment variables: .env file takes precedence over existing env vars.
+# If no .env file exists, existing environment variables are used as-is.
 env_path = Path(__file__).parent / ".env"
-if not env_path.exists():
-    print(
-        "Error: .env file not found\n"
-        "\n"
-        f"Expected location: {env_path}\n"
-        "\n"
-        "Create a .env file with at minimum:\n"
-        "\n"
-        "  ANTHROPIC_API_KEY=sk-ant-...\n"
-        "\n"
-        "The Claude Agent SDK requires a valid API key to spawn agents.",
-        file=sys.stderr,
-    )
-    sys.exit(1)
-load_dotenv(dotenv_path=env_path)
+if env_path.exists():
+    load_dotenv(dotenv_path=env_path, override=True)
 
 
 if __name__ == "__main__":
