@@ -321,6 +321,12 @@ def parse_args():
         default=10000,
         help="Width for exported PNG files from Mermaid diagrams (default: 10000)"
     )
+    diagrams_parser.add_argument(
+        "--png-scale",
+        type=int,
+        default=3,
+        help="Puppeteer scale factor for PNG quality/DPI (default: 3, higher = better quality)"
+    )
 
     # All phases
     all_parser = subparsers.add_parser(

@@ -57,7 +57,7 @@ def check_mmdc_available() -> bool:
     return shutil.which('mmdc') is not None
 
 
-def generate_png(mmd_file: Path, png_file: Path, width: int, chrome_path: str, force: bool = False) -> bool:
+def generate_png(mmd_file: Path, png_file: Path, width: int, chrome_path: str, scale: int = 1, force: bool = False) -> bool:
     """
     Generate PNG from Mermaid diagram.
 
@@ -66,6 +66,7 @@ def generate_png(mmd_file: Path, png_file: Path, width: int, chrome_path: str, f
         png_file: Path to output .png file
         width: Width in pixels
         chrome_path: Path to Chrome executable
+        scale: Puppeteer scale factor for DPI (default: 1)
         force: If False, skip if PNG exists and is newer than .mmd (default: False)
 
     Returns:
@@ -84,7 +85,7 @@ def generate_png(mmd_file: Path, png_file: Path, width: int, chrome_path: str, f
         env['PUPPETEER_EXECUTABLE_PATH'] = chrome_path
 
         result = subprocess.run(
-            ['mmdc', '-i', str(mmd_file), '-o', str(png_file), '-w', str(width)],
+            ['mmdc', '-i', str(mmd_file), '-o', str(png_file), '-w', str(width), '-s', str(scale)],
             env=env,
             capture_output=True,
             text=True,
@@ -104,7 +105,7 @@ def generate_png(mmd_file: Path, png_file: Path, width: int, chrome_path: str, f
         return False
 
 
-def process_directory(directory: Path, width: int, chrome_path: str, force: bool = False) -> tuple[int, int, int]:
+def process_directory(directory: Path, width: int, chrome_path: str, scale: int = 1, force: bool = False) -> tuple[int, int, int]:
     """
     Process all .mmd files in a directory.
 
@@ -112,6 +113,7 @@ def process_directory(directory: Path, width: int, chrome_path: str, force: bool
         directory: Directory containing .mmd files
         width: Width in pixels
         chrome_path: Path to Chrome executable
+        scale: Puppeteer scale factor for DPI (default: 1)
         force: If False, skip PNGs that are up-to-date (default: False)
 
     Returns:
@@ -129,7 +131,7 @@ def process_directory(directory: Path, width: int, chrome_path: str, force: bool
 
     mode_str = "Regenerating" if force else "Generating"
     print(f"{mode_str} PNGs for {len(mmd_files)} Mermaid diagram(s)...")
-    print(f"Width: {width}px, Chrome: {chrome_path}")
+    print(f"Width: {width}px, Scale: {scale}x, Chrome: {chrome_path}")
     if not force:
         print(f"Mode: Incremental (skip up-to-date PNGs)")
     else:
@@ -152,7 +154,7 @@ def process_directory(directory: Path, width: int, chrome_path: str, force: bool
             successful += 1  # Count as successful since PNG exists and is current
         else:
             print(f"  {mmd_file.name} → {png_file.name}")
-            if generate_png(mmd_file, png_file, width, chrome_path, force):
+            if generate_png(mmd_file, png_file, width, chrome_path, scale, force):
                 successful += 1
             else:
                 failed += 1
@@ -174,6 +176,12 @@ def main():
         type=int,
         default=10000,
         help='PNG width in pixels (default: 10000)'
+    )
+    parser.add_argument(
+        '--scale',
+        type=int,
+        default=3,
+        help='Puppeteer scale factor for DPI/quality (default: 3, higher = better quality)'
     )
     parser.add_argument(
         '--chrome-path',
@@ -214,7 +222,7 @@ def main():
 
     if args.path.is_dir():
         # Process directory
-        successful, failed, skipped = process_directory(args.path, args.width, chrome_path, args.force)
+        successful, failed, skipped = process_directory(args.path, args.width, chrome_path, args.scale, args.force)
     elif args.path.suffix == '.mmd':
         # Process single file
         png_file = args.path.with_suffix('.png')
@@ -233,9 +241,9 @@ def main():
             skipped = 1
         else:
             print(f"Generating PNG: {args.path.name} → {png_file.name}")
-            print(f"Width: {args.width}px, Chrome: {chrome_path}\n")
+            print(f"Width: {args.width}px, Scale: {args.scale}x, Chrome: {chrome_path}\n")
 
-            if generate_png(args.path, png_file, args.width, chrome_path, args.force):
+            if generate_png(args.path, png_file, args.width, chrome_path, args.scale, args.force):
                 successful = 1
                 failed = 0
                 skipped = 0
@@ -255,7 +263,7 @@ def main():
     print(f"Failed: {failed}")
     if skipped > 0:
         print(f"Skipped (up-to-date): {skipped}")
-    print(f"Width: {args.width}px")
+    print(f"Width: {args.width}px, Scale: {args.scale}x")
 
     return 0 if failed == 0 else 1
 
