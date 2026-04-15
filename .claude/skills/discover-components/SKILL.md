@@ -59,19 +59,43 @@ Before breadcrumb exploration, check whether the platform has **formal release i
 
 **Why this matters:** Without payload signals, the skill must infer "is this shipped?" from heuristics (has Dockerfile? has operator structure?). On a platform with 800+ repos where 179 are operators, heuristics produce a useless component map. Payload signals give a definitive answer.
 
-**Probe procedure — sample 5-10 repos** (prefer repos named `cluster-*-operator` or `*-controller`) and scan their `manifests/` directories for known signal patterns:
+**Probe procedure — sample 5-10 repos** (prefer repos named `cluster-*-operator` or `*-controller`) and scan their manifest directories for known signal patterns.
+
+**IMPORTANT: Path rules for signal scanning:**
+- Scan BOTH `manifests/` AND `install/` directories (some components use one or the other)
+- ALWAYS exclude `vendor/`, `testdata/`, `pkg/*/testdata/`, and `test/` paths — these contain vendored copies of other components' manifests and test fixtures that will produce false positives
+- Example: CVO's `vendor/` contains 97 YAML files with release annotations from OTHER operators
+
+```bash
+# Correct: exclude vendor and testdata
+grep -r --exclude-dir=vendor --exclude-dir=testdata "include.release.openshift.io" {sample_repo}/manifests/ {sample_repo}/install/ 2>/dev/null
+# WRONG: scanning all YAML will hit vendor/ and testdata/
+grep -r "include.release.openshift.io" {sample_repo}/ 2>/dev/null
+```
 
 #### Signal 1: Release Inclusion Annotations
 ```bash
-grep -r "include.release.openshift.io\|release.openshift.io\|operator.openshift.io/managed" {sample_repo}/manifests/ 2>/dev/null
+grep -r --exclude-dir=vendor --exclude-dir=testdata "include.release.openshift.io\|release.openshift.io\|operator.openshift.io/managed" {sample_repo}/manifests/ {sample_repo}/install/ 2>/dev/null
 ```
 These annotations declare that a component ships in a specific release profile (self-managed, single-node, hypershift, etc.).
 
 #### Signal 2: Capability/Optional Annotations
 ```bash
-grep -r "capability.openshift.io/name\|operator.openshift.io/capability" {sample_repo}/manifests/ 2>/dev/null
+grep -r --exclude-dir=vendor --exclude-dir=testdata "capability.openshift.io/name\|operator.openshift.io/capability" {sample_repo}/manifests/ {sample_repo}/install/ 2>/dev/null
 ```
 These mark a payload component as **optional** — it ships by default but can be disabled. Components WITHOUT this annotation (but WITH release inclusion) are **core**.
+
+**CRITICAL: Check the Deployment, not just any manifest.** A capability annotation on a sub-resource (dashboard, credential request, operator group) means "this sub-resource is conditional on that capability" — it does NOT mean the operator itself is optional. To determine if the operator is truly optional, check specifically whether the operator's **Deployment manifest** (`kind: Deployment`) has the capability annotation:
+
+```bash
+# Find the operator's Deployment manifest and check for capability annotation
+grep -l "kind: Deployment" {repo}/manifests/ {repo}/install/ 2>/dev/null | xargs grep -l "capability.openshift.io/name" 2>/dev/null
+```
+
+- If the **Deployment** has `capability.openshift.io/name: X` → the operator is `optional_platform` with `capability: "X"`
+- If only non-Deployment resources have capability annotations → the operator is `core_platform` (with some conditional sub-resources)
+
+**Extract the actual capability name** from the annotation value (e.g., `capability.openshift.io/name: openshift-samples` → `"capability": "openshift-samples"`). Do NOT use a generic placeholder like `"optional-component"`.
 
 #### Signal 3: Image Reference Manifests
 ```bash
@@ -95,14 +119,26 @@ For Helm-based platforms, check if a central chart index references this repo.
 
 #### Full Signal Scan
 
-Scan ALL repos in the checkouts directory for the detected signal type(s). Classify each repo into a tier:
+Scan ALL repos in the checkouts directory for the detected signal type(s). Apply the path rules above (scan `manifests/` + `install/`, exclude `vendor/` + `testdata/`). Classify each repo into a tier:
 
 | Tier | Criteria | Example |
 |------|----------|---------|
-| `core_platform` | Has release inclusion annotations but NO capability/optional annotation | `cluster-etcd-operator` |
-| `optional_platform` | Has release inclusion annotations AND a capability/optional annotation | `cluster-samples-operator` |
+| `core_platform` | Has release inclusion annotations and NO capability annotation **on its Deployment** | `cluster-etcd-operator`, `cluster-kube-apiserver-operator` |
+| `optional_platform` | Has release inclusion annotations AND capability annotation **on its Deployment** | `cluster-samples-operator` (capability: openshift-samples) |
 | `payload_component` | Has `image-references` but no release/capability annotations | Supporting images shipped in payload |
 | `ecosystem` | No release signals at all | `aws-account-operator` |
+
+**Important subtlety:** A repo like `cluster-kube-apiserver-operator` may have `capability.openshift.io/name: Console` on dashboard manifests — this means "only create this dashboard if Console capability is enabled," NOT "this operator is optional." Only the Deployment-level annotation determines the operator's tier.
+
+#### Bootstrap / Self-Referential Components
+
+Some components exist **before** the release payload mechanism and naturally won't annotate themselves:
+
+- **Cluster Version Operator (CVO)** — the component that reads `include.release.openshift.io` annotations and reconciles all other operators. It doesn't annotate itself because it IS the reconciler. If a repo contains CVO logic (look for `ClusterVersion` controller code, or repo name matches `*-version-operator`), classify as `core_platform` automatically.
+- **Installer** — bootstraps the cluster before CVO takes over. If a repo is named `installer` or contains cluster bootstrapping logic (terraform, ignition configs), include it as `core_platform` with `type: "installer"`.
+- **Bootstrap components** — repos that run during cluster bootstrap (e.g., `cluster-bootstrap`) may use `install/` instead of `manifests/`. Check both.
+
+General rule: if a component is part of the **bootstrap chain** that brings the platform into existence before the normal operator lifecycle starts, it's `core_platform` even without release annotations.
 
 **Record the tier for each repo.** This tiering drives the rest of the discovery process:
 - `core_platform` + `optional_platform` → full breadcrumb exploration in Steps 3-5
@@ -198,18 +234,23 @@ Look for:
 
 ### Step 5: Build Component Graph
 
+**This step runs in BOTH breadcrumb and release_payload_signals modes.** Even when payload signals identified the components, you still need dependency analysis to discover shared libraries (Step 5a) and populate the dependency graph.
+
+**In release_payload_signals mode:** Scan `go.mod` (or equivalent) of each discovered `core_platform` and `optional_platform` component. Look for first-party dependencies (same GitHub org) that match repos in the checkouts directory. This is how shared libraries like `library-go`, `api`, `client-go` get discovered.
+
 As you discover references:
 1. Check if referenced repo exists in checkouts directory
 2. If yes, add to component list with `discovered_via` and `referenced_by`
 3. Track what type of reference (deployed_component vs. dependency)
 4. Mark as `shipped: true` if deployed directly
+5. **Always populate the `dependency_graph`** — even in signal mode, record which components depend on which
 
 Track the dependency graph:
 ```
 {
-  "installer": ["awx-operator", "eda-operator"],
-  "awx-operator": ["awx-api", "awx-ui", "django-ansible-base"],
-  "eda-operator": ["eda-server", "django-ansible-base"],
+  "cluster-etcd-operator": ["api", "library-go", "client-go"],
+  "cluster-kube-apiserver-operator": ["api", "library-go", "client-go", "apiserver-library-go"],
+  "cluster-network-operator": ["api", "library-go", "client-go"],
   ...
 }
 ```
@@ -291,6 +332,42 @@ grep -r "Gateway\|HTTPRoute\|GRPCRoute" {platform_repo}/pilot/ | wc -l
 - ❌ `go-control-plane` - Utility library (you call it, architecture doesn't revolve around its types)
 - ❌ `client-go` - Kubernetes client library (tool, not contract)
 
+### Step 5c: Classify Component Type
+
+For each discovered component, determine its `type`. Do NOT default everything to `"operator"` just because it has manifests. Check what the repo actually contains:
+
+**`operator`** — Has a Deployment running a controller/reconciler binary:
+- Contains `main.go` or equivalent entrypoint with controller-runtime/operator-sdk imports
+- Has `config/manager/` or operator bundle structure
+- Reconciles CRDs or cluster resources
+
+**`service`** — Runs as a workload but is not a controller/operator:
+- Serves API endpoints, processes data, runs as a daemon
+- Examples: API servers, webhooks, proxies
+
+**`installer`** — Bootstraps the cluster or platform:
+- Contains terraform, ignition configs, installer logic
+- Examples: `installer`, `assisted-installer`
+
+**`asset`** — Ships static content, not running code:
+- GPG keys, branding assets, base images, OS definitions
+- Examples: `cluster-update-keys` (signing keys), `origin-branding` (UI branding), `okd-machine-os` (OS image definition), `driver-toolkit` (base container image)
+
+**`shared_library`** — Code imported by other components (detected in Step 5a)
+
+**`api_specification`** — Defines API contracts the platform implements (detected in Step 5b)
+
+**Quick heuristic:** If the repo has no `main.go`/`cmd/` and no Deployment that runs a binary it builds, it's not an operator.
+
+**`architecturally_significant` is independent of `type`.** Do NOT set `architecturally_significant: false` just because something is an `asset` or `service` instead of an `operator`. A component is architecturally significant if:
+- Other components depend on it or build on top of it (e.g., base container images)
+- It defines security boundaries (e.g., signing keys, certificates)
+- It's part of the bootstrap/install chain
+- It appears in the dependency graph with 2+ consumers
+- Removing or changing it would affect the architecture of the platform
+
+Default to `architecturally_significant: true` for all `core_platform` and `optional_platform` components regardless of type. Only set it to `false` for `payload_component` tier repos that are clearly peripheral (e.g., a deprecated shim that's still shipped but unused).
+
 ### Step 6: Classify Remaining Repos
 
 **If release payload signals were found (Step 2a):** The default is inverted. Repos without release signals are `ecosystem` tier and should be excluded unless they were pulled in as a shared library (Step 5a) or API specification (Step 5b). Do NOT apply the "possible shipped components" heuristics below to ecosystem-tier repos — the release signals are the authoritative source.
@@ -346,7 +423,7 @@ Create the component map structure:
       "source_folder": "config",
       "checkout_path": "{full-path}",
       "has_architecture": false,
-      "type": "operator|service|shared_library|api_specification",
+      "type": "operator|service|installer|asset|shared_library|api_specification",
       "tier": "core_platform|optional_platform|payload_component|ecosystem",
       "discovered_via": "release_payload_signal|operator_bundle|container_image|dependency|installer",
       "referenced_by": ["installer"],
@@ -368,7 +445,9 @@ Create the component map structure:
 
 ### Step 9: Write Output
 
-Write to `architecture/{platform}/component-map.json`:
+Write to `architecture/{platform}/component-map.json`.
+
+**Always overwrite** the existing file if one is present — the user is re-running discovery to get updated results. Do NOT skip writing because the file already exists.
 
 ```python
 # Use Write tool
@@ -451,9 +530,11 @@ Next steps:
 
 **Definitive (release payload signals — Step 2a):**
 - Has `include.release.openshift.io/*` or equivalent release inclusion annotation → definitely in payload
-- No `capability.openshift.io/name` → `tier: core_platform` (always installed)
-- Has `capability.openshift.io/name` → `tier: optional_platform` (can be disabled)
+- No `capability.openshift.io/name` **on Deployment manifest** → `tier: core_platform` (always installed)
+- Has `capability.openshift.io/name` **on Deployment manifest** → `tier: optional_platform` (can be disabled)
+- Capability annotations on non-Deployment resources (dashboards, credential requests) do NOT make the operator optional — they mean those sub-resources are conditional
 - Has `image-references` manifest → ships container images in the release
+- Bootstrap/self-referential components (CVO, installer) → `tier: core_platform` even without annotations
 
 When payload signals are available, they override all heuristic confidence levels below.
 
@@ -552,6 +633,30 @@ When payload signals are available, they override all heuristic confidence level
 - Excluding them makes your architecture diagrams incomplete — the CRDs your control plane reconciles just vanish
 - Understanding *what* your platform implements is as important as understanding *how*
 
+**Common mistake #3:** Marking an operator as optional because ANY manifest has a capability annotation
+
+**Why this is wrong:**
+- A capability annotation on a dashboard means "only create this dashboard if Console is enabled"
+- A capability annotation on a credential request means "only create this credential if CloudCredential is enabled"
+- Neither of these means the OPERATOR is optional
+- Only the Deployment manifest determines the operator's tier
+- Example: `cluster-kube-apiserver-operator` has `capability.openshift.io/name: Console` on dashboards but is absolutely core — without it there's no API server
+
+**Common mistake #4:** Classifying every repo with manifests as `type: "operator"`
+
+**Why this is wrong:**
+- A repo that ships GPG signing keys (`cluster-update-keys`) is not an operator
+- A repo that ships branding assets (`origin-branding`) is not an operator
+- A repo that provides a base container image (`driver-toolkit`) is not an operator
+- Check for actual controller/reconciler code before using `type: "operator"` (see Step 5c)
+
+**Common mistake #5:** Excluding bootstrap components that lack release annotations
+
+**Why this is wrong:**
+- CVO is the thing that reads release annotations — it can't annotate itself
+- The installer bootstraps the cluster before CVO exists
+- These are the most architecturally significant components and must be `core_platform`
+
 **Rule of thumb:**
 - If it's in the same GitHub org AND used by 2+ components → INCLUDE as `type: "shared_library"`
 - If it's external BUT defines CRDs/APIs your platform implements → INCLUDE as `type: "api_specification"`
@@ -560,6 +665,7 @@ When payload signals are available, they override all heuristic confidence level
 **Example distinction:**
 - ✅ Include: `ansible/django-ansible-base` (first-party, used by AWX + EDA + Hub)
 - ✅ Include: `kubernetes-sigs/gateway-api` (external, but Istio's control plane implements its CRDs)
+- ✅ Include: `cluster-version-operator` (core_platform, even without release annotations — it's the reconciler)
 - ❌ Exclude: `django/django` (third-party utility, not in ansible org)
 - ❌ Exclude: `postgres` (infrastructure, third-party)
 - ❌ Exclude: `envoyproxy/go-control-plane` (third-party library you call, not a contract you implement)
