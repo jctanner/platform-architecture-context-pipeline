@@ -19,7 +19,7 @@ from lib.manifest_parser import (
 from lib.component_discovery import write_component_map, read_component_map, get_component_map_metadata
 from lib.build_info import get_build_info, format_build_info_context
 from lib.kustomize_context import get_component_kustomize_context, format_kustomize_context
-from lib.agent_runner import run_agent, run_agents_concurrently, get_model_display_name, format_duration
+from lib.agent_runner import run_agent, run_agent_cli, run_agents_concurrently, get_model_display_name, format_duration
 from lib.cli import resolve_script_path
 
 # Import scripts as modules
@@ -167,7 +167,9 @@ Arguments:
     log_dir = Path("logs/discover-components")
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"Running component discovery with Skills enabled...")
+    use_cli = getattr(args, 'use_cli', False)
+    mode_label = "CLI subprocess (claude -p)" if use_cli else "SDK"
+    print(f"Running component discovery with Skills enabled ({mode_label})...")
     print(f"Model: {args.model}")
     print(f"Log directory: {log_dir}\n")
 
@@ -178,7 +180,13 @@ Arguments:
         "prompt": prompt,
     }
 
-    result = await run_agent(job, log_dir, args.model, enable_skills=True)
+    if use_cli:
+        # CLI mode: uses `claude -p` subprocess with --dangerously-skip-permissions.
+        # Sub-agents spawned by the Task tool inherit permissions, enabling
+        # multi-reviewer consensus in the discover-components skill.
+        result = await run_agent_cli(job, log_dir, args.model)
+    else:
+        result = await run_agent(job, log_dir, args.model, enable_skills=True)
 
     # Report result
     print("\n" + "=" * 60)

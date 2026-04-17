@@ -1,6 +1,6 @@
 """Claude SDK agent launcher and model utilities.
 
-Two approaches for running agents:
+Three approaches for running agents:
 
 1. **Direct Skill Invocation** (enable_skills=True):
    - Let Claude discover and invoke skills automatically
@@ -16,9 +16,18 @@ Two approaches for running agents:
    - Best for: Complex workflows needing context injection
    - Example: generate-architecture (injects git, build, kustomize context)
 
-Both approaches use the same run_agent() function.
+3. **CLI Subprocess** (run_agent_cli):
+   - Runs `claude -p` as a subprocess instead of using the SDK
+   - Uses --dangerously-skip-permissions for full permission inheritance
+   - Sub-agents spawned by the Task tool inherit permissions automatically
+   - Best for: Skills that use Task tool for multi-reviewer consensus
+   - Example: discover-components with --use-cli
+
+Approaches 1 and 2 use run_agent(). Approach 3 uses run_agent_cli().
 """
 
+import json
+import shutil
 import time
 import asyncio
 from pathlib import Path
@@ -107,7 +116,7 @@ async def run_agent(
     model_id = get_model_id(model)
 
     # Base allowed tools
-    allowed_tools = ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]
+    allowed_tools = ["Read", "Write", "Edit", "Bash", "Glob", "Grep", "Task"]
 
     # Add Skill tool if skills are enabled
     if enable_skills:
@@ -191,6 +200,212 @@ async def run_agent(
             log.write(f"ERROR: {e}\n")
 
         return {"name": name, "success": False, "error": str(e), "log_file": str(log_file), "duration_seconds": elapsed}
+
+    finally:
+        heartbeat_task.cancel()
+        try:
+            await heartbeat_task
+        except asyncio.CancelledError:
+            pass
+
+
+async def run_agent_cli(
+    job: dict,
+    log_dir: Path,
+    model: str = "sonnet",
+) -> dict:
+    """
+    Launch a Claude agent session via `claude -p` subprocess.
+
+    Uses the Claude CLI directly instead of the SDK. This enables full Task
+    tool support — sub-agents spawned by the Task tool inherit the
+    --dangerously-skip-permissions flag, which the SDK's bypassPermissions
+    mode does NOT propagate.
+
+    Args:
+        job: Dict with 'name', 'cwd', 'prompt' keys
+        log_dir: Directory to write log files
+        model: Claude model to use (sonnet, opus, or haiku)
+
+    Returns:
+        dict with 'name', 'success', 'log_file', and optional 'error' keys
+    """
+    name = job["name"]
+    cwd = job["cwd"]
+    prompt = job["prompt"]
+
+    log_file = log_dir / f"{name.replace('/', '_')}.log"
+
+    # Find the claude binary
+    claude_bin = shutil.which("claude")
+    if not claude_bin:
+        return {
+            "name": name,
+            "success": False,
+            "error": "claude CLI not found in PATH",
+            "log_file": str(log_file),
+            "duration_seconds": 0,
+        }
+
+    cmd = [
+        claude_bin,
+        "--model", model,
+        "--print",
+        "--dangerously-skip-permissions",
+        "--output-format", "stream-json",
+        "--verbose",
+        prompt,
+    ]
+
+    print(f"\n{'=' * 60}")
+    print(f"Starting agent (CLI mode): {name}")
+    print(f"Model: {model}")
+    print(f"Working directory: {cwd}")
+    print(f"Log file: {log_file}")
+    print(f"{'=' * 60}")
+
+    # Write log header
+    with open(log_file, 'w') as log:
+        log.write(f"Agent: {name}\n")
+        log.write(f"Model: {model}\n")
+        log.write(f"Mode: CLI subprocess (claude -p)\n")
+        log.write(f"Working directory: {cwd}\n")
+        log.write(f"{'=' * 60}\n\n")
+        log.write("PROMPT:\n")
+        log.write(prompt)
+        log.write(f"\n\n{'=' * 60}\n")
+        log.write("AGENT OUTPUT:\n\n")
+
+    start_time = time.monotonic()
+    last_activity = start_time
+
+    async def _heartbeat():
+        nonlocal last_activity
+        while True:
+            await asyncio.sleep(30)
+            silence = time.monotonic() - last_activity
+            elapsed = time.monotonic() - start_time
+            if silence >= 30:
+                print(f"[{name}] ... still running ({format_duration(elapsed)} elapsed)")
+
+    heartbeat_task = asyncio.create_task(_heartbeat())
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=cwd,
+        )
+
+        with open(log_file, 'a') as log:
+            # Process stream-json lines from stdout
+            while True:
+                line = await proc.stdout.readline()
+                if not line:
+                    break
+
+                last_activity = time.monotonic()
+                line_str = line.decode('utf-8', errors='replace').rstrip()
+
+                if not line_str:
+                    continue
+
+                # Parse stream-json events for readable console output
+                try:
+                    msg = json.loads(line_str)
+                    msg_type = msg.get("type")
+
+                    if msg_type == "stream_event":
+                        event = msg.get("event", {})
+                        event_type = event.get("type")
+
+                        if event_type == "content_block_start":
+                            block = event.get("content_block", {})
+                            block_type = block.get("type")
+                            if block_type == "tool_use":
+                                tool_name = block.get("name", "?")
+                                print(f"[{name}] tool: {tool_name}")
+                                log.write(f"[tool_use] {tool_name}\n")
+
+                        elif event_type == "content_block_delta":
+                            delta = event.get("delta", {})
+                            delta_type = delta.get("type")
+                            if delta_type == "text_delta":
+                                text = delta.get("text", "")
+                                if text:
+                                    log.write(text)
+
+                    elif msg_type == "system":
+                        subtype = msg.get("subtype", "")
+                        if subtype == "task_started":
+                            task_desc = msg.get("description", "sub-agent")
+                            print(f"[{name}] sub-agent started: {task_desc}")
+                            log.write(f"[sub-agent started] {task_desc}\n")
+                        elif subtype == "task_notification":
+                            status = msg.get("status", "?")
+                            print(f"[{name}] sub-agent {status}")
+                            log.write(f"[sub-agent {status}]\n")
+
+                    elif msg_type == "result":
+                        log.write(f"\n[result] {line_str}\n")
+
+                except (json.JSONDecodeError, ValueError):
+                    # Non-JSON output, log as-is
+                    log.write(f"{line_str}\n")
+
+                log.flush()
+
+        # Wait for process to finish
+        await proc.wait()
+
+        # Capture stderr
+        stderr_bytes = await proc.stderr.read()
+        stderr_str = stderr_bytes.decode('utf-8', errors='replace').strip()
+        if stderr_str:
+            with open(log_file, 'a') as log:
+                log.write(f"\n{'=' * 60}\n")
+                log.write(f"STDERR:\n{stderr_str}\n")
+
+        elapsed = time.monotonic() - start_time
+        success = proc.returncode == 0
+
+        print(f"\n{'=' * 60}")
+        status = "Completed" if success else "Failed"
+        print(f"{status}: {name} ({format_duration(elapsed)}, exit={proc.returncode})")
+        print(f"{'=' * 60}")
+
+        result = {
+            "name": name,
+            "success": success,
+            "log_file": str(log_file),
+            "duration_seconds": elapsed,
+        }
+        if not success:
+            result["error"] = f"claude exited with code {proc.returncode}"
+            if stderr_str:
+                result["error"] += f": {stderr_str[:500]}"
+        return result
+
+    except Exception as e:
+        elapsed = time.monotonic() - start_time
+
+        print(f"\n{'=' * 60}")
+        print(f"Failed: {name} ({format_duration(elapsed)})")
+        print(f"Error: {e}")
+        print(f"{'=' * 60}")
+
+        with open(log_file, 'a') as log:
+            log.write(f"\n\n{'=' * 60}\n")
+            log.write(f"ERROR: {e}\n")
+
+        return {
+            "name": name,
+            "success": False,
+            "error": str(e),
+            "log_file": str(log_file),
+            "duration_seconds": elapsed,
+        }
 
     finally:
         heartbeat_task.cancel()

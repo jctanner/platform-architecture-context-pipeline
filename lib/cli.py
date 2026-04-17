@@ -136,6 +136,12 @@ def parse_args():
         default="sonnet",
         help="Claude model to use for discovery (default: sonnet)"
     )
+    discover_parser.add_argument(
+        "--use-cli",
+        action="store_true",
+        help="Use 'claude -p' subprocess instead of SDK. Enables full Task tool support "
+             "(sub-agent spawning with permission inheritance) needed for multi-reviewer consensus."
+    )
 
     # Phase 3: Generate architecture
     generate_arch_parser = subparsers.add_parser(

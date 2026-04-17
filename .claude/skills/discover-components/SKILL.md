@@ -1,7 +1,7 @@
 ---
 name: discover-components
 description: Discover platform components by exploring breadcrumbs (installers, operators, dependencies) in checkouts directory. Outputs component-map.json for platforms without manifest scripts.
-allowed-tools: Read, Glob, Grep, Write, Bash(ls *), Bash(find *), Bash(cat *), Bash(grep *)
+allowed-tools: Read, Glob, Grep, Write, Task, Bash(ls *), Bash(find *), Bash(cat *), Bash(grep *)
 ---
 
 # Discover Components
@@ -236,12 +236,34 @@ Look for:
 
 **This step runs in BOTH breadcrumb and release_payload_signals modes.** Even when payload signals identified the components, you still need dependency analysis to discover shared libraries (Step 5a) and populate the dependency graph.
 
-**In release_payload_signals mode:** Scan `go.mod` (or equivalent) of each discovered `core_platform` and `optional_platform` component. Look for first-party dependencies (same GitHub org) that match repos in the checkouts directory. This is how shared libraries like `library-go`, `api`, `client-go` get discovered.
+**In release_payload_signals mode**, two additional scans are required:
+
+**5.1: Discover operand repos via `image-references`.** Operators often deploy separate repos as operands (the workload the operator manages). These operand repos typically have NO release annotations of their own — the operator carries the annotations and the operand is just a container image the operator deploys.
+
+Scan the `image-references` file (in `manifests/` or `install/`) of each discovered operator. For each image name listed:
+1. Check if a repo with that name exists in the checkouts directory
+2. If yes and it's not already in the component list, add it as `tier: "payload_component"`, `discovered_via: "operator_operand"`, `referenced_by: ["{operator-name}"]`
+3. Mark as `shipped: true` (it's deployed by the operator)
+
+```bash
+# Example: console-operator's image-references lists "console" as an operand
+cat {operator_repo}/manifests/image-references
+# - name: console-operator    ← the operator itself
+# - name: console             ← the operand (separate repo!)
+```
+
+Common operator→operand pairs:
+- `console-operator` → `console` (web UI)
+- `cluster-ingress-operator` → router/haproxy-router
+- `cluster-image-registry-operator` → `image-registry`
+- `cluster-dns-operator` → coredns
+
+**5.2: Scan `go.mod` for shared libraries.** Scan `go.mod` (or equivalent) of each discovered `core_platform` and `optional_platform` component. Look for first-party dependencies (same GitHub org) that match repos in the checkouts directory. This is how shared libraries like `library-go`, `api`, `client-go` get discovered.
 
 As you discover references:
 1. Check if referenced repo exists in checkouts directory
 2. If yes, add to component list with `discovered_via` and `referenced_by`
-3. Track what type of reference (deployed_component vs. dependency)
+3. Track what type of reference (deployed_component vs. dependency vs. operand)
 4. Mark as `shipped: true` if deployed directly
 5. **Always populate the `dependency_graph`** — even in signal mode, record which components depend on which
 
@@ -336,14 +358,28 @@ grep -r "Gateway\|HTTPRoute\|GRPCRoute" {platform_repo}/pilot/ | wc -l
 
 For each discovered component, determine its `type`. Do NOT default everything to `"operator"` just because it has manifests. Check what the repo actually contains:
 
-**`operator`** — Has a Deployment running a controller/reconciler binary:
+**`operator`** — Has a Deployment running a controller/reconciler binary AND owns its own operator lifecycle:
 - Contains `main.go` or equivalent entrypoint with controller-runtime/operator-sdk imports
-- Has `config/manager/` or operator bundle structure
+- Has `config/manager/` or operator bundle structure (OLM bundle, CSV)
 - Reconciles CRDs or cluster resources
+- Has its own OLM lifecycle (or is the top-level meta-operator)
+- Key distinction from `controller`: operators manage their own installation/upgrade lifecycle via OLM or equivalent
+
+**`controller`** — Runs a reconciliation loop but does NOT own its own operator lifecycle:
+- Uses controller-runtime/kubebuilder but is deployed as a sub-component of a parent operator
+- May define or watch CRDs, but doesn't have its own OLM bundle or CSV
+- Examples: notebook-controller (deployed by rhods-operator), odh-model-controller (deployed by rhods-operator)
+- Key distinction from `operator`: controllers are deployed by operators, not independently installable
 
 **`service`** — Runs as a workload but is not a controller/operator:
 - Serves API endpoints, processes data, runs as a daemon
-- Examples: API servers, webhooks, proxies
+- Examples: API servers, model servers, proxies, pipeline servers
+
+**`ui`** — A user-facing web application (frontend, dashboard):
+- Contains frontend code (React, Angular, Vue, etc.) and optionally a backend-for-frontend
+- Serves a web UI that users interact with directly
+- Examples: odh-dashboard (React + Node.js), console (OpenShift web console)
+- Key distinction from `service`: the primary purpose is user-facing UI, not a headless API
 
 **`installer`** — Bootstraps the cluster or platform:
 - Contains terraform, ignition configs, installer logic
@@ -388,6 +424,144 @@ Default to `architecturally_significant: true` for all `core_platform` and `opti
 - Development helpers
 - Archived/stale (no commits in 12+ months)
 
+### Step 6a: Multi-Reviewer Consensus for Low-Confidence Repos
+
+After Step 6, you will have repos that fall into **low or medium confidence** buckets — they have some signals suggesting they're shipped components but not enough for a definitive classification. Instead of making a single-pass decision on these borderline repos, use a **multi-reviewer consensus** process to reduce false positives and false negatives.
+
+**When to trigger consensus review:**
+
+In **breadcrumb mode** (no release payload signals): repos classified as "Low confidence" or "Medium confidence" in Step 6.
+
+In **manifest mode**: repos in the `excluded` list that match ANY of these patterns:
+- Repo name matches a container image referenced by an included operator (potential operand)
+- Repo name suggests a runtime component (contains `server`, `runtime`, `gateway`, `proxy`, `scheduler`)
+- Repo contains a Dockerfile/Containerfile AND Kubernetes manifests but wasn't in the manifest script
+- Repo is in the same GitHub org as included components and has recent activity
+
+**Skip consensus** for repos that are clearly non-components (docs-only, CI tooling, archived). Only spend reviewer cycles on genuinely ambiguous cases.
+
+#### Consensus Procedure
+
+For each borderline repo, spawn **3 independent reviewer agents in parallel** using the Task tool with `subagent_type=Explore`. Each reviewer examines the same repo but through a different evaluation lens:
+
+**Reviewer A — Structural Analysis:**
+```
+Examine the repo at {checkout_path}. Determine whether this repo is a shipped
+platform component based on its STRUCTURE. Look for:
+- Dockerfile/Containerfile (builds a container image?)
+- Kubernetes manifests, Helm charts, kustomize overlays (deployed to a cluster?)
+- Operator patterns: main.go/cmd/, controller-runtime imports, CRD definitions
+- Service patterns: API server code, gRPC/REST endpoints, daemon entrypoints
+- Asset patterns: static content only, no running code
+
+Return a JSON object with exactly these fields:
+{
+  "vote": "include" | "exclude" | "unsure",
+  "suggested_type": "operator" | "controller" | "service" | "ui" | "asset" | "shared_library" | "other",
+  "rationale": "<one sentence explaining your reasoning>"
+}
+```
+
+**Reviewer B — Relational Analysis:**
+```
+Examine the repo at {checkout_path}. Determine whether this repo is a shipped
+platform component based on its RELATIONSHIPS to other components. Check:
+- Is this repo's name referenced as a container image in any included operator's
+  manifests, CSV, or source code? (Search the operator repos for image refs matching
+  this repo name)
+- Does this repo's go.mod / requirements.txt import or get imported by included components?
+- Is this repo referenced in CI/CD configs of included components?
+- Does this repo define CRDs that included operators reconcile?
+
+The included operators are: {list of already-included component keys}
+
+Return a JSON object with exactly these fields:
+{
+  "vote": "include" | "exclude" | "unsure",
+  "suggested_type": "operator" | "controller" | "service" | "ui" | "asset" | "shared_library" | "other",
+  "rationale": "<one sentence explaining your reasoning>",
+  "referenced_by": ["<list of components that reference this repo, if any>"]
+}
+```
+
+**Reviewer C — Functional Analysis:**
+```
+Examine the repo at {checkout_path}. Determine whether this repo is a shipped
+platform component based on its FUNCTION — what does it actually do at runtime?
+- Read the README, top-level docs, and main entrypoint to understand the repo's purpose
+- Is this a production runtime workload (serves traffic, processes data, manages resources)?
+- Is this a development/build tool (used during CI/CD but not deployed to production)?
+- Is this a test utility, documentation repo, or helper script collection?
+- Is this a serving runtime or model server (deployed by an operator on demand)?
+
+Return a JSON object with exactly these fields:
+{
+  "vote": "include" | "exclude" | "unsure",
+  "suggested_type": "operator" | "controller" | "service" | "ui" | "asset" | "shared_library" | "other",
+  "rationale": "<one sentence explaining your reasoning>"
+}
+```
+
+#### Aggregating Votes
+
+After all three reviewers return, aggregate their votes:
+
+| Votes | Decision | Confidence |
+|-------|----------|------------|
+| 3/3 include | Include the repo | `"high"` |
+| 3/3 exclude | Exclude the repo | `"high"` |
+| 2/3 include | Include the repo | `"medium"` |
+| 2/3 exclude | Exclude the repo | `"medium"` |
+| 3-way split or all unsure | Include the repo, flag for human review | `"disputed"` |
+
+For the `suggested_type`, use the majority type if 2+ reviewers agree. If all three suggest different types, prefer the structural reviewer's suggestion (Reviewer A) as the tiebreaker since it's based on concrete repo contents.
+
+#### Recording Consensus Results
+
+For repos that go through consensus review, add a `consensus` field to their entry in the component map:
+
+```json
+{
+  "confidence": "high|medium|disputed",
+  "consensus": {
+    "votes": {"include": 2, "exclude": 1},
+    "reviewers": {
+      "structural": {"vote": "include", "type": "service", "rationale": "Has Dockerfile and kustomize manifests for production deployment"},
+      "relational": {"vote": "include", "type": "service", "rationale": "Image referenced by data-science-pipelines-operator CSV"},
+      "functional": {"vote": "exclude", "type": "other", "rationale": "Operand binary only, no standalone deployment lifecycle"}
+    }
+  }
+}
+```
+
+For repos excluded via consensus, move them to the `excluded` section but preserve the consensus data:
+
+```json
+"excluded": {
+  "some-repo": {
+    "reason": "consensus_exclude",
+    "confidence": "medium",
+    "consensus": {
+      "votes": {"include": 1, "exclude": 2},
+      "reviewers": {
+        "structural": {"vote": "include", "type": "service", "rationale": "..."},
+        "relational": {"vote": "exclude", "type": "other", "rationale": "..."},
+        "functional": {"vote": "exclude", "type": "other", "rationale": "..."}
+      }
+    }
+  }
+}
+```
+
+Repos excluded with `"confidence": "disputed"` or `"medium"` should be highlighted in the Step 10 summary so the user knows to review them.
+
+#### Performance Notes
+
+- Launch all 3 reviewers for a single repo in parallel (single message with 3 Task tool calls)
+- If multiple repos need consensus review, batch them: review up to 3 repos concurrently (9 parallel agents total) to avoid excessive parallelism
+- Use `model: "haiku"` for reviewer agents to minimize cost and latency — the structural/relational/functional checks are straightforward exploration tasks
+- If the checkouts directory has more than 20 borderline repos, prioritize: review repos with names matching included operators' image references first, then repos with Dockerfiles + manifests, then the rest
+
 ### Step 7: Check for Existing Architectures
 
 For each discovered component, check if `GENERATED_ARCHITECTURE.md` exists:
@@ -423,22 +597,43 @@ Create the component map structure:
       "source_folder": "config",
       "checkout_path": "{full-path}",
       "has_architecture": false,
-      "type": "operator|service|installer|asset|shared_library|api_specification",
+      "type": "operator|controller|service|ui|installer|asset|shared_library|api_specification",
       "tier": "core_platform|optional_platform|payload_component|ecosystem",
-      "discovered_via": "release_payload_signal|operator_bundle|container_image|dependency|installer",
+      "discovered_via": "release_payload_signal|operator_operand|operator_bundle|container_image|dependency|installer",
       "referenced_by": ["installer"],
       "shipped": true,
       "architecturally_significant": true,
       "consumer_count": 3,
       "consumers": ["awx-operator", "eda-operator", "hub-operator"],
-      "capability": "optional-capability-name-if-applicable"
+      "capability": "optional-capability-name-if-applicable",
+      "confidence": "high|medium|disputed",
+      "consensus": {
+        "votes": {"include": 2, "exclude": 1},
+        "reviewers": {
+          "structural": {"vote": "include", "type": "service", "rationale": "..."},
+          "relational": {"vote": "include", "type": "service", "rationale": "..."},
+          "functional": {"vote": "exclude", "type": "other", "rationale": "..."}
+        }
+      }
     }
   },
   "dependency_graph": {
     "{repo}": ["{dep1}", "{dep2}"]
   },
   "excluded": {
-    "{repo-name}": "{reason}"
+    "{repo-name}": "{reason}",
+    "{repo-name-reviewed}": {
+      "reason": "consensus_exclude",
+      "confidence": "high|medium",
+      "consensus": {
+        "votes": {"include": 0, "exclude": 3},
+        "reviewers": {
+          "structural": {"vote": "exclude", "type": "other", "rationale": "..."},
+          "relational": {"vote": "exclude", "type": "other", "rationale": "..."},
+          "functional": {"vote": "exclude", "type": "other", "rationale": "..."}
+        }
+      }
+    }
   }
 }
 ```
@@ -491,6 +686,21 @@ Shared libraries / API specs:
   ✓ gateway-api (type: api_specification, upstream: kubernetes-sigs) [ARCHITECTURALLY SIGNIFICANT]
   ...
 
+Consensus-reviewed (included):
+  ✓ console (type: service, confidence: high, votes: 3/3 include)
+      structural: include — "Has Dockerfile, deployed as pod"
+      relational: include — "Image referenced by console-operator"
+      functional: include — "Web UI served in production"
+  ...
+
+Consensus-reviewed (excluded — review recommended):
+  ✗ some-tool (confidence: medium, votes: 2/3 exclude)
+  ...
+
+Disputed (needs human review):
+  ⚠ ambiguous-repo (confidence: disputed, votes: 1/1/1)
+  ...
+
 Ecosystem (excluded — no release payload signals):
   ✗ aws-account-operator (ecosystem)
   ✗ addon-operator (ecosystem)
@@ -508,6 +718,27 @@ Discovered components:
   ✓ awx-api (type: service, via: container_image, ref by: awx-operator)
   ✓ django-ansible-base (type: shared_library, used by: 3 components) [ARCHITECTURALLY SIGNIFICANT]
   ✓ gateway-api (type: api_specification, upstream: kubernetes-sigs) [ARCHITECTURALLY SIGNIFICANT]
+  ...
+
+Consensus-reviewed (included):
+  ✓ data-science-pipelines (type: service, confidence: medium, votes: 2/3 include)
+      structural: include — "Has Dockerfile and kustomize manifests"
+      relational: include — "Image referenced by data-science-pipelines-operator"
+      functional: exclude — "Operand only, no standalone lifecycle"
+  ...
+
+Consensus-reviewed (excluded — review recommended):
+  ✗ some-helper-tool (confidence: medium, votes: 2/3 exclude)
+      structural: include — "Has Dockerfile"
+      relational: exclude — "Not referenced by any included component"
+      functional: exclude — "CI/CD helper, not a production workload"
+  ...
+
+Disputed (needs human review):
+  ⚠ ambiguous-repo (confidence: disputed, votes: 1/1/1)
+      structural: include — "..."
+      relational: exclude — "..."
+      functional: unsure — "..."
   ...
 
 Excluded repositories:
