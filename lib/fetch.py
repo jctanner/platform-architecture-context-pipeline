@@ -151,12 +151,21 @@ async def fetch_repositories(
         env=env,
     )
 
-    stdout, stderr = await proc.communicate()
+    # Stream stdout and stderr in real time so the user sees progress
+    async def _stream(stream):
+        async for line in stream:
+            text = line.decode().rstrip("\n")
+            if text:
+                print(text, flush=True)
 
-    if proc.returncode != 0:
-        print(f"Error cloning repositories: {stderr.decode()}")
-        raise RuntimeError(f"gh-org-clone failed with exit code {proc.returncode}")
+    await asyncio.gather(
+        _stream(proc.stdout),
+        _stream(proc.stderr),
+    )
+
+    returncode = await proc.wait()
+
+    if returncode != 0:
+        raise RuntimeError(f"gh-org-clone failed with exit code {returncode}")
 
     print(f"Successfully cloned repositories from {org}")
-    if stdout:
-        print(stdout.decode())
