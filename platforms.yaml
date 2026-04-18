@@ -3,11 +3,16 @@
 ## Each top-level key is a platform identifier used by the fetch,
 ## discover-components, and generate-architecture subcommands.
 ##
-## Fields:
-##   orgs            - primary GitHub orgs to clone (list)
-##   extra_orgs      - additional orgs whose repos belong to this platform
-##   extra_repos     - individual cross-org repos to clone
-##   exclude_repos   - repos to skip during fetch (supports globs)
+## Fetch fields:
+##   orgs              - primary GitHub orgs to clone (list)
+##   extra_orgs        - additional orgs whose repos belong to this platform
+##   extra_repos       - individual cross-org repos to clone
+##   exclude_repos     - repos to skip during fetch (supports globs)
+##
+## Component map override fields (applied after discovery):
+##   component_overrides  - fix fields on discovered components (keyed by component key)
+##   exclude_components   - remove components from the map (supports globs)
+##   include_components   - add components not found by discovery
 
 odh:
   orgs:
@@ -49,3 +54,36 @@ openshift:
   exclude_repos:
     - "*/openshift-origin-design"
     - "*/test-infra"
+
+  # Fix type misclassifications
+  component_overrides:
+    openshift-state-metrics:
+      type: service
+    console-operator:
+      type: operator
+    # Fix tier misclassifications — these are core, not optional
+    cluster-ingress-operator:
+      tier: core_platform
+    cluster-storage-operator:
+      tier: core_platform
+    cluster-image-registry-operator:
+      tier: core_platform
+    cloud-credential-operator:
+      tier: core_platform
+    # IBM-specific CSI driver is not core
+    ibm-vpc-block-csi-driver-operator:
+      tier: optional_platform
+
+  # Go libraries — not deployed components, skip architecture generation
+  exclude_components:
+    - build-machinery-go
+    - custom-resource-status
+    - controller-runtime-common
+    - runtime-utils
+
+  # Components discovery missed
+  include_components:
+    - key: oc
+      repo_org: openshift
+      repo_name: oc
+      type: cli

@@ -197,9 +197,14 @@ def parse_args():
         help="Only process specific component(s). Supports glob patterns (e.g., 'eda*', 'awx-*'). Can be specified multiple times."
     )
     generate_arch_parser.add_argument(
+        "--architecture-dir",
+        default="architecture",
+        help="Output directory for architecture files (default: architecture)"
+    )
+    generate_arch_parser.add_argument(
         "--force",
         action="store_true",
-        help="Delete existing GENERATED_ARCHITECTURE.md and regenerate"
+        help="Delete existing architecture files and regenerate"
     )
     generate_arch_parser.add_argument(
         "--model",

@@ -16,7 +16,7 @@ from lib.manifest_parser import (
     components_to_json,
     discover_adjacent_components,
 )
-from lib.component_discovery import write_component_map, read_component_map, get_component_map_metadata
+from lib.component_discovery import write_component_map, read_component_map, get_component_map_metadata, apply_platform_overrides
 from lib.build_info import get_build_info, format_build_info_context
 from lib.kustomize_context import get_component_kustomize_context, format_kustomize_context
 from lib.agent_runner import run_agent, run_agent_cli, run_agents_concurrently, get_model_display_name, format_duration
@@ -414,6 +414,16 @@ async def run_generate_architecture_phase(args) -> None:
             print("  3. --script-path to point to a manifest script explicitly")
         return
 
+    # Apply platform overrides from platforms.yaml
+    if args.platform:
+        try:
+            platform_config = load_platform_config(args.platform)
+            components = apply_platform_overrides(
+                components, platform_config, args.checkouts_dir
+            )
+        except (FileNotFoundError, KeyError):
+            pass  # No platforms.yaml or platform not defined — skip overrides
+
     # Apply component filter if specified
     if getattr(args, 'components', None):
         # Create alias mapping for operator
@@ -462,15 +472,25 @@ async def run_generate_architecture_phase(args) -> None:
         else:
             print(f"Filtered to {len(components)} component(s): {', '.join(sorted(components.keys()))}\n")
 
-    # Handle --force: delete existing GENERATED_ARCHITECTURE.md files
+    # Determine output directory for architecture files
+    architecture_dir = Path(getattr(args, 'architecture_dir', 'architecture'))
+    platform_arch_dir = architecture_dir / args.platform if args.platform else architecture_dir / "generic"
+    platform_arch_dir.mkdir(parents=True, exist_ok=True)
+
+    # Check has_architecture based on output dir (not checkout path)
+    for component in components.values():
+        arch_file = platform_arch_dir / f"{component.key}.md"
+        component.has_architecture = arch_file.exists()
+
+    # Handle --force: delete existing architecture files
     if args.force:
-        print("Force mode: Deleting existing GENERATED_ARCHITECTURE.md files...\n")
+        print(f"Force mode: Deleting existing architecture files from {platform_arch_dir}...\n")
         for component in components.values():
-            arch_file = component.checkout_path / "GENERATED_ARCHITECTURE.md"
+            arch_file = platform_arch_dir / f"{component.key}.md"
             if arch_file.exists():
                 arch_file.unlink()
-                print(f"  Deleted: {component.key}/GENERATED_ARCHITECTURE.md")
-                component.has_architecture = False  # Update status
+                print(f"  Deleted: {component.key}.md")
+                component.has_architecture = False
         print()
 
     # Filter to components missing architecture (unless --force, which already deleted them)
@@ -504,7 +524,34 @@ async def run_generate_architecture_phase(args) -> None:
 
     # Prepare agent jobs
     jobs = []
+    skipped_missing = []
     for component in sorted(missing_arch, key=lambda c: c.key):
+        # Determine the agent's working directory
+        # The agent needs to read source code from the checkout
+        checkout_path = component.checkout_path
+        if checkout_path and Path(checkout_path).exists():
+            cwd = str(checkout_path)
+        else:
+            # Checkout path doesn't exist (e.g., monorepo sub-component)
+            # Try the parent repo checkout instead
+            if checkout_path:
+                # Walk up to find an existing parent
+                candidate = Path(checkout_path)
+                while candidate != candidate.parent:
+                    if candidate.exists():
+                        cwd = str(candidate)
+                        break
+                    candidate = candidate.parent
+                else:
+                    skipped_missing.append(component.key)
+                    continue
+            else:
+                skipped_missing.append(component.key)
+                continue
+
+        # Output file path in architecture directory
+        output_file = platform_arch_dir / f"{component.key}.md"
+
         # Determine distribution (use platform if set, otherwise generic)
         distribution = args.platform if args.platform else "generic"
 
@@ -526,7 +573,7 @@ async def run_generate_architecture_phase(args) -> None:
                 ) + "\n"
 
         # Pre-gather git metadata so the agent doesn't have to
-        git_context = _format_git_context(component.checkout_path)
+        git_context = _format_git_context(Path(cwd))
         if git_context:
             git_context += "\n"
 
@@ -542,26 +589,40 @@ This is critical for understanding how this component is deployed in production.
 
 """
 
+        # Build source_folder context for monorepo components
+        source_folder_note = ""
+        if component.source_folder and str(checkout_path) != cwd:
+            source_folder_note = f"Source folder within repo: {component.source_folder}\n"
+
         prompt = f"""Generate a comprehensive architecture summary for this component repository.
 
 {distribution_line}Repository: {component.repo_org}/{component.repo_name}
-{manifests_folder_line}{build_context}{kustomize_context_str}{git_context}{manifests_importance_note}IMPORTANT: For the "Generated By" metadata field, use exactly: {model_display}
+{source_folder_note}{manifests_folder_line}{build_context}{kustomize_context_str}{git_context}{manifests_importance_note}IMPORTANT: For the "Generated By" metadata field, use exactly: {model_display}
+
+IMPORTANT: Write the output file to this exact path: {output_file.absolute()}
+Do NOT create GENERATED_ARCHITECTURE.md — write directly to the path above.
 
 {instructions}
 """
 
-        # Write the prompt to GENERATED_ARCHITECTURE_PROMPT.md alongside
-        # where GENERATED_ARCHITECTURE.md will be created
-        prompt_file = component.checkout_path / "GENERATED_ARCHITECTURE_PROMPT.md"
+        # Write the prompt for debugging/reproducibility
+        prompt_file = platform_arch_dir / f"{component.key}.prompt.md"
         prompt_file.write_text(prompt)
 
         job = {
             "name": f"{component.key}",
-            "cwd": str(component.checkout_path),
+            "cwd": cwd,
             "prompt": prompt,
-            "repo": f"{component.repo_org}/{component.repo_name}",
+            "repo": f"{component.repo_org}/{component.repo_name}" if component.repo_org else component.key,
+            "output_file": str(output_file),
         }
         jobs.append(job)
+
+    if skipped_missing:
+        print(f"Skipped {len(skipped_missing)} component(s) with no checkout path:")
+        for name in skipped_missing:
+            print(f"  ! {name}")
+        print()
 
     # Apply limit if specified
     if args.limit:
@@ -572,7 +633,8 @@ This is critical for understanding how this component is deployed in production.
     print(f"Prepared {len(jobs)} agent job(s):\n")
     for i, job in enumerate(jobs, 1):
         print(f"{i:2d}. {job['name']:30s} {job['repo']}")
-        print(f"    cwd: {job['cwd']}")
+        print(f"    source: {job['cwd']}")
+        print(f"    output: {job['output_file']}")
         print()
 
     # Create logs directory
@@ -618,7 +680,7 @@ This is critical for understanding how this component is deployed in production.
     for job, result in zip(jobs, results):
         if not isinstance(result, dict) or not result.get("success"):
             continue
-        arch_file = Path(job["cwd"]) / "GENERATED_ARCHITECTURE.md"
+        arch_file = Path(job["output_file"])
         if not arch_file.exists():
             continue
         elapsed = result.get("duration_seconds", 0)
