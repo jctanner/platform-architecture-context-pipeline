@@ -155,7 +155,7 @@ def parse_args():
     # Phase 3: Generate architecture
     generate_arch_parser = subparsers.add_parser(
         "generate-architecture",
-        help="Check component repos for GENERATED_ARCHITECTURE.md files"
+        help="Generate component architecture summaries to architecture/<platform>/"
     )
     generate_arch_parser.add_argument(
         "--platform",
