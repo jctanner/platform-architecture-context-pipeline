@@ -124,8 +124,7 @@ def parse_args():
     )
     discover_parser.add_argument(
         "--checkouts-dir",
-        required=True,
-        help="Directory containing cloned repositories"
+        help="Directory containing cloned repositories (auto-detected from platforms.yaml if --platform is set)"
     )
     discover_parser.add_argument(
         "--entry-repo",

@@ -8,7 +8,7 @@ import fnmatch
 import shutil
 from pathlib import Path
 
-from lib.fetch import fetch_repositories
+from lib.fetch import fetch_repositories, load_platform_config
 from lib.manifest_parser import (
     ComponentInfo,
     process_manifest_script,
@@ -156,23 +156,70 @@ async def run_discover_components_phase(args) -> None:
     print("PHASE 2B: Discovering platform components")
     print("=" * 60 + "\n")
 
+    # Resolve checkout directories from platforms.yaml if not explicitly provided
+    checkouts_dirs = []
+    platform_config = None
+
+    if args.checkouts_dir:
+        # Explicit --checkouts-dir overrides everything
+        checkouts_dirs = [args.checkouts_dir]
+    else:
+        try:
+            platform_config = load_platform_config(args.platform)
+            # Primary orgs
+            for org in platform_config.get("orgs", []):
+                checkouts_dirs.append(f"checkouts/{org}")
+            # Extra orgs
+            for org in platform_config.get("extra_orgs", []):
+                checkouts_dirs.append(f"checkouts/{org}")
+            # Extra repos — add parent org dirs (deduplicated)
+            for entry in platform_config.get("extra_repos", []):
+                org_dir = f"checkouts/{entry['org']}"
+                if org_dir not in checkouts_dirs:
+                    checkouts_dirs.append(org_dir)
+
+            if checkouts_dirs:
+                print(f"Resolved checkout directories from platforms.yaml:")
+                for d in checkouts_dirs:
+                    print(f"  - {d}")
+            else:
+                print(f"Error: no orgs defined for platform '{args.platform}' in platforms.yaml")
+                return
+        except (FileNotFoundError, KeyError) as e:
+            print(f"Error: --checkouts-dir is required (could not resolve from platforms.yaml: {e})")
+            return
+
+    # Use first dir as the primary for backward compat
+    args.checkouts_dir = checkouts_dirs[0]
+
     print(f"Platform: {args.platform}")
-    print(f"Checkouts directory: {args.checkouts_dir}")
     if args.entry_repo:
         print(f"Entry point: {args.entry_repo}")
     print()
 
     # Build a simple prompt that will trigger the discover-components skill
-    # The skill description will match and Claude will invoke it automatically
     exclude_patterns = getattr(args, 'exclude', '')
+    # Merge excludes from platform config
+    if platform_config:
+        config_excludes = platform_config.get("exclude_repos", [])
+        if config_excludes:
+            combined = ",".join(config_excludes)
+            if exclude_patterns:
+                exclude_patterns = f"{exclude_patterns},{combined}"
+            else:
+                exclude_patterns = combined
+
     exclude_line = f" --exclude={exclude_patterns}" if exclude_patterns else ""
     entry_line = f" --entry-repo={args.entry_repo}" if args.entry_repo else ""
+
+    # Build checkouts-dir arguments for the prompt
+    checkouts_dir_lines = "\n".join(f"--checkouts-dir={d}" for d in checkouts_dirs)
 
     prompt = f"""Use the discover-components skill to discover platform components.
 
 Arguments:
 --platform={args.platform}
---checkouts-dir={args.checkouts_dir}{entry_line}{exclude_line}
+{checkouts_dir_lines}{entry_line}{exclude_line}
 --architecture-dir={args.architecture_dir}
 """
 
