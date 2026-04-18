@@ -68,10 +68,23 @@ async def run_fetch_phase(args) -> None:
     print("PHASE 1: Fetching repositories")
     print("=" * 60 + "\n")
 
+    platform = getattr(args, 'platform', None)
+    org = getattr(args, 'org', None)
+
+    if platform and org:
+        print("Error: specify either an org name or --platform, not both")
+        return
+
+    if not platform and not org:
+        print("Error: specify either an org name or --platform")
+        return
+
     await fetch_repositories(
-        args.org,
-        args.checkouts_dir,
-        branch=getattr(args, 'branch', None)
+        org=org,
+        checkouts_dir=args.checkouts_dir,
+        branch=getattr(args, 'branch', None),
+        exclude=getattr(args, 'exclude', None),
+        platform=platform,
     )
 
 

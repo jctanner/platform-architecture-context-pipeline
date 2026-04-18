@@ -50,7 +50,13 @@ def parse_args():
     )
     fetch_parser.add_argument(
         "org",
-        help="GitHub organization name to clone"
+        nargs="?",
+        help="GitHub organization name to clone (or use --platform instead)"
+    )
+    fetch_parser.add_argument(
+        "--platform",
+        help="Platform name from platforms.yaml (e.g., 'odh', 'rhoai'). "
+             "Clones all orgs, extra repos, and applies exclusions from the config."
     )
     fetch_parser.add_argument(
         "--checkouts-dir",
@@ -60,6 +66,10 @@ def parse_args():
     fetch_parser.add_argument(
         "--branch",
         help="Specific branch to clone (skips repos without this branch)"
+    )
+    fetch_parser.add_argument(
+        "--exclude",
+        help="Comma-separated glob patterns to exclude repos (e.g. 'test-*,*-docs')"
     )
 
     # Phase 2a: Parse manifests (for platforms with manifest scripts)

@@ -1,0 +1,51 @@
+## Platform definitions for the architecture context pipeline.
+##
+## Each top-level key is a platform identifier used by the fetch,
+## discover-components, and generate-architecture subcommands.
+##
+## Fields:
+##   orgs            - primary GitHub orgs to clone (list)
+##   extra_orgs      - additional orgs whose repos belong to this platform
+##   extra_repos     - individual cross-org repos to clone
+##   exclude_repos   - repos to skip during fetch (supports globs)
+
+odh:
+  orgs:
+    - opendatahub-io
+  extra_orgs:
+    - llm-d
+  extra_repos:
+    - org: project-codeflare
+      repo: codeflare-sdk
+  exclude_repos:
+    - "*-docs"
+    - "*-design"
+    - "*/test-infra"
+
+rhoai:
+  orgs:
+    - red-hat-data-services
+  extra_orgs:
+    - llm-d
+  extra_repos:
+    - org: project-codeflare
+      repo: codeflare-sdk
+  exclude_repos:
+    - "*-docs"
+    - "*-design"
+    - "*/test-infra"
+
+kubernetes:
+  orgs:
+    - kubernetes
+  exclude_repos:
+    - "*/test-infra"
+    - "*/website"
+    - "*.github.io"
+
+openshift:
+  orgs:
+    - openshift
+  exclude_repos:
+    - "*/openshift-origin-design"
+    - "*/test-infra"
