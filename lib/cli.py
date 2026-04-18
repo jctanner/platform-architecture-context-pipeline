@@ -213,35 +213,6 @@ def parse_args():
         help="Claude model to use (default: opus)"
     )
 
-    # Phase 4: Collect architectures
-    collect_parser = subparsers.add_parser(
-        "collect-architectures",
-        help="Collect and organize GENERATED_ARCHITECTURE.md files into architecture/ directory"
-    )
-    collect_parser.add_argument(
-        "--checkouts-dir",
-        default="checkouts",
-        help="Directory containing platform checkouts (default: checkouts)"
-    )
-    collect_parser.add_argument(
-        "--output-dir",
-        default="architecture",
-        help="Output directory for organized architectures (default: architecture)"
-    )
-    collect_parser.add_argument(
-        "--org",
-        help="Collect from a specific org (e.g., 'ansible', 'opendatahub-io'). Takes precedence over --platform."
-    )
-    collect_parser.add_argument(
-        "--platform",
-        help="Which platform to collect (e.g., 'odh', 'rhoai', 'aap', or 'all' for all platforms). "
-             "Ignored if --org is specified."
-    )
-    collect_parser.add_argument(
-        "--version",
-        help="Only collect this specific version (default: all versions)"
-    )
-
     # Phase 5: Generate platform architectures
     platform_arch_parser = subparsers.add_parser(
         "generate-platform-architecture",
